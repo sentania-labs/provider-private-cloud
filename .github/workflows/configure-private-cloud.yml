@@ -1,0 +1,67 @@
+name: Configure Provider Private Cloud
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
+    runs-on: [self-hosted, terraform]
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+      # VCFA System-org admin auth (username/password, not api_token: see
+      # README's "why username/password" note).
+      TF_VAR_vcfa_admin_username: ${{ secrets.VCF_LAB_SYSTEM_ADMIN_USERNAME }}
+      TF_VAR_vcfa_admin_password: ${{ secrets.VCF_LAB_SYSTEM_ADMIN_PASSWORD }}
+
+      # VCF Operations IAM API (OIDC client minting/rotation, see orgs.tf).
+      TF_VAR_ops_api_base_url: ${{ secrets.VCF_OPS_API_BASE_URL }}
+      TF_VAR_ops_api_token: ${{ secrets.VCF_OPS_API_TOKEN }}
+      TF_VAR_sso_realm_id: ${{ secrets.VCF_OPS_SSO_REALM_ID }}
+
+      TF_VAR_local_admin_passwords: ${{ secrets.VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS }}
+      TF_VAR_external_cidr: ${{ secrets.VCF_LAB_EXTERNAL_CIDR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init -migrate-state -input=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+              terraform plan -input=false -no-color \
+              -var-file="envs/lab.tfvars" \
+              -out=tfplan
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: terraform-plan
+          path: tfplan
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Clean workspace
+        run: rm -rf $GITHUB_WORKSPACE/.[!.]*

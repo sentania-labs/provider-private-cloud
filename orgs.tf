@@ -1,0 +1,133 @@
+# Orgs (spec 3.4): module.orgs is the whole org product, OIDC included. The
+# OIDC client_id/client_secret it needs are minted here via the VCF
+# Operations fleet-management IAM API (Mastercard/restapi provider), never
+# carried by hand: vcfa_org_oidc's client_secret is not recoverable from
+# VCFA once set, so hand-carrying it would mean it only ever lives in one
+# person's clipboard.
+#
+# See README.md "State is credential-bearing" and "restapi provider
+# limitations" sections before touching this file.
+
+# Unauthenticated discovery URL, shared by every org's OIDC federation
+# (same vIDB realm). NOT VERIFIED against a live Ops instance: the
+# restapi_object data source is built for list-search responses
+# (search_key/search_value/results_key), and this endpoint is documented
+# in the spec as returning a single object, not an array. If the live
+# response shape doesn't match, results_key/search_key will need
+# adjustment -- confirm before first apply.
+data "restapi_object" "vidb_wellknown" {
+  path         = "/suite-api/api/auth/sources/vidb/well-known-url"
+  search_key   = "wellKnownEndpoint"
+  search_value = "*"
+}
+
+locals {
+  oidc_orgs = { for k, o in var.orgs : k => o if o.oidc != null }
+}
+
+# Creates one OAuth App per org under the Ops SSO realm. The create response
+# (clientId, clientSecret, issuerUrl) is captured via write_returns_object /
+# create_returns_object on the provider (see provider.tf).
+resource "restapi_object" "oauth_app" {
+  for_each = local.oidc_orgs
+
+  path          = "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps"
+  create_method = "POST"
+  id_attribute  = "clientId"
+
+  data = jsonencode({
+    name        = "${each.value.name}-oidc"
+    description = "OIDC client for VCFA org ${each.value.name}, managed by provider-private-cloud."
+  })
+}
+
+locals {
+  # Full path to each org's rotate action. Computed as a local (not inline
+  # in the resource below) because a resource block cannot reference its
+  # own other arguments, and this same path is used for both the create
+  # and update method overrides.
+  oauth_app_rotate_path = {
+    for k, o in local.oidc_orgs :
+    k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}/rotate"
+  }
+}
+
+# Rotation is on-demand, never on every apply (ruling 4). This resource
+# does not model a real CRUD object: POST .../rotate is a bare imperative
+# action, not something with GET/PUT/DELETE semantics, and the restapi
+# provider has no first-class "fire once when a trigger changes, otherwise
+# zero-diff" primitive for that shape. The closest honest fit:
+#
+#   - `data` holds only `rotation_id`. As long as var.orgs[*].oidc.rotation_id
+#     is unchanged, `data` doesn't change, so Terraform issues no API call
+#     and the plan is clean and empty for this resource.
+#   - `update_method`/`update_path` are overridden to POST the rotate path,
+#     so a *change* to `rotation_id` fires exactly one POST to rotate,
+#     never a PUT to a real update endpoint that doesn't exist.
+#   - `ignore_all_server_changes = true` because there is nothing to read
+#     back and compare: this is an action trigger, not a stateful object.
+#     Without it, the provider's normal drift-correction behavior has
+#     nothing meaningful to reconcile against.
+#
+# On first apply (object doesn't exist yet), Terraform calls CREATE, which
+# also targets the rotate path (create_method/path below): the org's OAuth
+# app is rotated immediately after being minted. This is deliberate, not
+# an oversight -- it makes the rotate resource's response the single
+# source of truth for "the org's current client secret" in every case,
+# including the very first apply, rather than needing to special-case
+# "first secret came from create, every secret after came from rotate."
+#
+# What this can't express cleanly: there is no server-side DELETE for a
+# rotation action. Removing this resource from config (or removing an
+# org's oidc block after it's been applied) would issue a DELETE against
+# the rotate path, which the API almost certainly doesn't support. Don't
+# do that: to stop managing an org's OIDC federation, set is_enabled=false
+# or remove the org from var.orgs entirely (which also destroys
+# module.orgs' vcfa_org_oidc), not just its oidc block.
+resource "restapi_object" "oauth_app_rotate" {
+  for_each = local.oauth_app_rotate_path
+
+  path          = each.value
+  object_id     = "${each.key}-rotation"
+  create_method = "POST"
+  update_method = "POST"
+  update_path   = each.value
+
+  ignore_all_server_changes = true
+
+  data = jsonencode({
+    rotation_id = local.oidc_orgs[each.key].oidc.rotation_id
+  })
+}
+
+module "orgs" {
+  source   = "sentania-labs/org/vcfa"
+  version  = "~> 0.1.0"
+  for_each = var.orgs
+
+  name         = each.value.name
+  display_name = each.value.display_name
+  description  = each.value.description
+  is_enabled   = each.value.is_enabled
+
+  local_admin          = each.value.local_admin
+  local_admin_password = each.value.local_admin == null ? null : var.local_admin_passwords[each.key]
+
+  oidc = each.value.oidc == null ? null : {
+    client_id              = restapi_object.oauth_app[each.key].id
+    wellknown_endpoint     = data.restapi_object.vidb_wellknown.api_data["wellKnownEndpoint"]
+    scopes                 = each.value.oidc.scopes
+    ui_button_label        = each.value.oidc.ui_button_label
+    max_clock_skew_seconds = each.value.oidc.max_clock_skew_seconds
+    prefer_id_token        = each.value.oidc.prefer_id_token
+    groups                 = each.value.oidc.groups
+  }
+  # api_response is documented as "the raw body of the HTTP response from
+  # the last read of the object" -- whether the provider populates it from
+  # the write call itself (create/update) or only from a subsequent read is
+  # not confirmed against a live Ops instance. If it turns out stale/empty
+  # here, api_data (the fmt-stringified map) or create_response are the
+  # fallbacks to try; flagged in README's restapi-provider-limitations
+  # section as something to verify before a first real apply.
+  oidc_client_secret = each.value.oidc == null ? null : jsondecode(restapi_object.oauth_app_rotate[each.key].api_response)["clientSecret"]
+}
