@@ -112,13 +112,14 @@ variable "tier0_gateway_name" {
 
 /**
  * external_cidr
- * Resolved: 172.17.0.0/16, the region's own surviving External IP Block (see
- * external_connectivity.tf and README's "External CIDR" section). Set in
+ * Resolved: 172.17.0.0/16, the region's own surviving External IP Block,
+ * adopted via the import block in external_connectivity.tf rather than
+ * created fresh (see README's "External CIDR" section). Set in
  * envs/lab.tfvars, no default here since it is env-specific topology.
  */
 variable "external_cidr" {
   type        = string
-  description = "CIDR block for the region's external IP space. See README's External CIDR section for the pre-apply collision check against the surviving supervisor-side block."
+  description = "CIDR block for the region's external IP space. See README's External CIDR section: this block is imported/adopted, not created, because it survived the VCFA teardown."
 }
 
 ########################################

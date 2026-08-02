@@ -13,7 +13,7 @@ provider-private-cloud/
 ├── provider.tf                # vcfa + restapi provider config
 ├── variables.tf                # All root variables
 ├── region.tf                   # vCenter/NSX/Supervisor data sources + vcfa_region
-├── external_connectivity.tf    # IP space + provider gateway (BLOCKING: external CIDR)
+├── external_connectivity.tf    # IP space (imported, not created) + provider gateway
 ├── content_library.tf          # Provider content library + items
 ├── orgs.tf                     # module.orgs + OIDC client mint/rotate (restapi provider)
 ├── org_networking.tf           # module.org_networking
@@ -37,8 +37,8 @@ Credentials are supplied via `TF_VAR_*` (see "Variables not in tfvars" below), n
 
 Read before the first real apply against the lab:
 
-1. **`vcenter_name` is a genuine placeholder** (`envs/lab.tfvars`). VCFA is currently torn down, so the registered display name can't be verified against a live instance. Confirm it against the live vCenter before applying.
-2. **External CIDR collision posture is UNRESOLVED.** See "External CIDR" below: the provider docs don't settle whether creating `vcfa_region` + `vcfa_ip_space` against `172.17.0.0/16` collides with the surviving supervisor-side External IP Block of the same range, or whether it's expected/adopted. Confirm live before applying, or run the `workflow_dispatch` plan-only dry run first (see "Dry run before merge" below) and read the plan carefully for that resource.
+1. **`vcenter_name` is a genuine placeholder** (`envs/lab.tfvars`). VCFA is currently torn down, so the registered display name can't be verified against a live instance. Checked again on 2026-08-02 for a pre-teardown state capture (`docs/state-captures/2026-08-01-vcfa-pre-teardown/` in `lab-admin`) that might record the registered name: that directory is not present on disk in that workspace, so the placeholder stays as-is. Confirm it against the live vCenter before applying.
+2. **External IP space is imported, not created; the imported quota fields are unverified.** See "External CIDR" below: `vcfa_ip_space.ext` now carries an `import {}` block that adopts the teardown-surviving `vcf-lab-region01-default-ip-space` block instead of creating a second one over `172.17.0.0/16`. What's still open is whether `default_quota_max_subnet_size` / `default_quota_max_cidr_count` / `default_quota_max_ip_count` as configured match the live block's actual settings; a plan immediately after import that wants to change any of those three fields means they don't. Run the `workflow_dispatch` plan-only dry run first (see "Dry run before merge" below) and read that resource's plan carefully.
 3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. See "OAuth app redirect/logout URLs" below.
 
 ## Registry modules consumed
@@ -84,13 +84,13 @@ The `Mastercard/restapi` provider models everything as a `restapi_object` (a RES
 
 `var.external_cidr` = `172.17.0.0/16`, set in `envs/lab.tfvars`. This was previously believed to collide with the supervisor's default connectivity profile and was left unset (BLOCKING). That was backwards: live vCenter evidence (wld01-cl01-supervisor > Configure > Network > Workload Networks) shows a single External IP Block named `vcf-lab-region01-default-ip-space`, whose name is derived from this repo's region name (`vcf-lab-region01`). This IS the region's own external IP space, not a foreign allocation to avoid. It survived the VCFA teardown and still exists on the supervisor under that name. `172.18.0.0/16`, seen in older docs, was a reservation for a second supervisor (`wld01-cl02-supervisor`) that was never built and doesn't exist; that value is stale.
 
-**UNRESOLVED: collision posture against the surviving block.** Whether creating `vcfa_region` + `vcfa_ip_space` with `172.17.0.0/16` collides with the block that already exists on the supervisor, whether VCFA creates that block itself on region creation (and fails because one already exists), or whether it expects one to pre-exist and adopts/references it, isn't settled by the published `vmware/vcfa` provider docs:
+**Resolved: the block is imported, not created.** Because `vcf-lab-region01-default-ip-space` already exists (a teardown survivor), `external_connectivity.tf` carries an `import {}` block adopting it into `vcfa_ip_space.ext` rather than declaring a fresh `vcfa_ip_space` over the same CIDR, which is the actual collision this repo would otherwise hit on a first apply (not a hypothetical: the block is confirmed live, so a plain `create` here would either 409 against NSX or silently produce a second block over `172.17.0.0/16`, neither of which is wanted). Confirmed against the published `vmware/vcfa` provider docs (`docs/resources/ip_space.md`, fetched from `github.com/vmware/terraform-provider-vcfa` at the `main` branch on 2026-08-02):
 
-- `vcfa_ip_space`'s docs describe IP Spaces as the mechanism for allocating external addresses to orgs, but say nothing about collision detection against a pre-existing supervisor-side block, and nothing about whether region/ip-space creation expects a block to already exist versus creating a fresh one.
-- `vcfa_ip_space` does document `terraform import` support (`terraform import vcfa_ip_space.imported <region-name>.<ip-space-name>`), which is consistent with a workflow where the surviving block is adopted rather than recreated, but the docs don't state that this is required or even expected for this scenario.
-- `vcfa_region`'s docs don't mention IP space/External IP Block creation at all as a side effect of region creation.
+- The resource exports `is_imported_ip_block`, an explicit signal that adoption of a pre-existing NSX IP Block is a supported, intended posture for this resource, not just a recovery mechanism.
+- The documented import ID format is `<region-name>.<ip-space-name>` (a literal `.`-separated path, configurable via the provider's `import_separator`), which is what the `import {}` block's `id` argument uses here: `"${var.region_name}.${var.region_name}-default-ip-space"`.
+- The resource's `name` argument was changed from the old placeholder computed name (`"${var.region_name}-ipspace01"`) to `"${var.region_name}-default-ip-space"`, matching the live block's actual name, so config and live reality agree post-import.
 
-Given the docs don't settle it, this is left **UNRESOLVED** rather than guessed. Three concrete postures to weigh before the first apply (see pre-apply checklist above): (1) apply as configured and read the plan for `vcfa_ip_space.ext` carefully, since a `create` where the API instead 409s would show up as a failed apply, not a silent bad state, (2) `terraform import` the surviving block into `vcfa_ip_space.ext` first, or (3) get a direct answer from VMware support/docs on whether `vcfa_region` creation auto-provisions the default IP space (in which case the explicit `vcfa_ip_space` resource here may be redundant or need adjusting). A parallel investigation elsewhere may settle this before Scott needs to decide.
+**Still open: whether the declared quota fields match the live block.** `default_quota_max_subnet_size = 24`, `default_quota_max_cidr_count = -1`, `default_quota_max_ip_count = -1` are the values carried over from the original sketch, not confirmed against the live block's actual configuration: this workspace has no API access to read it back. An import followed by a plan that immediately wants to change any of these three fields is not a clean adoption, it's a disguised recreate-in-place; read that resource's plan carefully on the first `terraform plan` after this merges (see pre-apply checklist above).
 
 ## VCFA provider auth
 
@@ -139,8 +139,8 @@ No true "unlimited" sentinel is documented for `vcfa_org_region_quota`'s `cpu_li
 
 ## Open decisions carried over from the spec
 
-1. **External CIDR collision posture**: UNRESOLVED, see "External CIDR" above.
-2. **Custom roles/rights capture** (`roles.tf`): left as an empty/scaffolded file. Capturing which of the pre-teardown lab's 5 global roles, 28 rights bundles, and 6 provider roles were custom (versus stock, which should not be redeclared) requires diffing against Scott's pre-teardown `vcfa-state.json` capture, which isn't available in this workspace.
+1. **External IP space quota fields**: unverified against the live block, see "External CIDR" above. The collision itself is resolved (import, not create).
+2. **Custom roles/rights capture** (`roles.tf`): left as an empty/scaffolded file. Capturing which of the pre-teardown lab's 5 global roles, 28 rights bundles, and 6 provider roles were custom (versus stock, which should not be redeclared) requires diffing against Scott's pre-teardown `vcfa-state.json` capture. Checked again on 2026-08-02 for `docs/state-captures/2026-08-01-vcfa-pre-teardown/` in `lab-admin`: still not present on disk in that workspace, so this stays scaffolded, not guessed.
 3. **SupervisorNamespaceClasses module placement**: not built here (out of scope for this repo per spec 3.9). Open: module lives here, or in the org tenant repos (`vm-apps-private-cloud` / `all-apps-private-cloud`)?
 4. **`hol-scitech` ownership**: does it live in `var.orgs` here, or get created by the hand-off python so the pod maintainer sees the whole flow end to end? Not included in `envs/lab.tfvars` pending this answer.
 5. **OAuth app redirect URL**: guessed, see "OAuth app redirect/logout URLs" above, needs reconciling against `module.orgs[*].oidc_redirect_uri` after a first apply.

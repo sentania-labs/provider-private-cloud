@@ -7,22 +7,34 @@
 # (wld01-cl01-supervisor > Configure > Network > Workload Networks) shows a
 # single External IP Block named "vcf-lab-region01-default-ip-space", whose
 # name is derived from this repo's region name. This IS the region's own
-# external IP space, not a foreign allocation to avoid colliding with. It
-# survived the VCFA teardown and still exists on the supervisor under that
-# name. 172.18.0.0/16, seen in older docs, was a reservation for a second
-# supervisor (wld01-cl02-supervisor) that was never built; that value is
-# stale and unused. See README's "External CIDR" section for the pre-apply
-# check this leaves open: whether creating vcfa_region + vcfa_ip_space
-# against a CIDR that already has a surviving block on the supervisor
-# collides, or is adopted/expected.
+# external IP space, a teardown survivor, not a foreign allocation to avoid
+# colliding with. 172.18.0.0/16, seen in older docs, was a reservation for a
+# second supervisor (wld01-cl02-supervisor) that was never built; that value
+# is stale and unused.
+#
+# Because the block already exists, this resource is ADOPTED via the
+# import block below, not created fresh: a plain `create` against an
+# already-registered block is the collision this config now avoids by
+# construction, not just by an operator reading the plan carefully. See
+# README's "External CIDR" section for the quota-field caveat this still
+# leaves open (unverified against the live block's actual configured quota).
 
 data "vcfa_tier0_gateway" "t0" {
   name      = var.tier0_gateway_name
   region_id = vcfa_region.region01.id
 }
 
+# Adopts the teardown-surviving External IP Block instead of creating a
+# second one over the same CIDR. Import ID format confirmed against the
+# published provider docs (docs/resources/ip_space.md, "Importing" section):
+# "<region-name>.<ip-space-name>".
+import {
+  to = vcfa_ip_space.ext
+  id = "${var.region_name}.${var.region_name}-default-ip-space"
+}
+
 resource "vcfa_ip_space" "ext" {
-  name      = "${var.region_name}-ipspace01"
+  name      = "${var.region_name}-default-ip-space"
   region_id = vcfa_region.region01.id
 
   cidr_blocks {
@@ -30,6 +42,11 @@ resource "vcfa_ip_space" "ext" {
     cidr = var.external_cidr
   }
 
+  # Best-effort defaults, not confirmed against the live block's actual
+  # configured quota (no API access from this workspace to read it back).
+  # A plan immediately after import that wants to change these three fields
+  # means the live block is configured differently than guessed here: that
+  # plan output is the correction, not this comment.
   default_quota_max_subnet_size = 24
   default_quota_max_cidr_count  = -1
   default_quota_max_ip_count    = -1
