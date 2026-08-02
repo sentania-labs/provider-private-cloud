@@ -112,14 +112,15 @@ variable "tier0_gateway_name" {
 
 /**
  * external_cidr
- * Resolved: 172.17.0.0/16, the region's own surviving External IP Block,
- * adopted via the import block in external_connectivity.tf rather than
- * created fresh (see README's "External CIDR" section). Set in
- * envs/lab.tfvars, no default here since it is env-specific topology.
+ * Resolved: 172.18.0.0/16, a fresh CIDR confirmed live and free in NSX,
+ * created via vcfa_ip_space.ext in external_connectivity.tf. Zero contact
+ * with 172.17.0.0/16, the untouched onboarding block (see README's
+ * "External CIDR" section). Set in envs/lab.tfvars, no default here since
+ * it is env-specific topology.
  */
 variable "external_cidr" {
   type        = string
-  description = "CIDR block for the region's external IP space. See README's External CIDR section: this block is imported/adopted, not created, because it survived the VCFA teardown."
+  description = "CIDR block for the region's external IP space. See README's External CIDR section: this is a fresh IP space created on this CIDR, not adopted from anything existing."
 }
 
 ########################################
@@ -182,6 +183,23 @@ variable "oauth_app_logout_url_pattern" {
 ########################################
 # Orgs (spec 3.4) -- OIDC client_id/client_secret are minted via orgs.tf, not carried here
 ########################################
+
+/**
+ * enable_orgs
+ * Phase-1/phase-2 rollout gate for Scott's staged apply plan. When false,
+ * every org-scoped resource (module.orgs, org networking, region quotas,
+ * OIDC/OAuth client minting) is skipped: only the region, external IP
+ * space, provider gateway, and content library get built. content_library.tf
+ * is provider-scoped (System org), not org-scoped, and always builds
+ * regardless of this flag. See locals.tf's local.effective_orgs, which is
+ * what actually gates for_each in orgs.tf / org_networking.tf /
+ * region_quota.tf; var.orgs itself is never emptied.
+ */
+variable "enable_orgs" {
+  type        = bool
+  description = "When false, org-scoped resources (module.orgs, org networking, region quotas, OIDC/OAuth client minting) are skipped; only region, external IP space, provider gateway, and content library are built. This is the phase-1/phase-2 rollout gate."
+  default     = true
+}
 
 variable "orgs" {
   type = map(object({

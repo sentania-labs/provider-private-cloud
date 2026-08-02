@@ -9,7 +9,7 @@
 # limitations" sections before touching this file.
 
 locals {
-  oidc_orgs = { for k, o in var.orgs : k => o if o.oidc != null }
+  oidc_orgs = { for k, o in local.effective_orgs : k => o if o.oidc != null }
 }
 
 # Creates one OAuth App per org under the Ops SSO realm. The create response
@@ -100,7 +100,7 @@ resource "restapi_object" "oauth_app_rotate" {
 module "orgs" {
   source   = "sentania-labs/org/vcfa"
   version  = "~> 0.1.0"
-  for_each = var.orgs
+  for_each = local.effective_orgs
 
   name         = each.value.name
   display_name = each.value.display_name

@@ -12,8 +12,9 @@ provider-private-cloud/
 ├── versions.tf                # Required providers
 ├── provider.tf                # vcfa + restapi provider config
 ├── variables.tf                # All root variables
+├── locals.tf                   # local.effective_orgs (enable_orgs phase gate)
 ├── region.tf                   # vCenter/NSX/Supervisor data sources + vcfa_region
-├── external_connectivity.tf    # IP space (imported, not created) + provider gateway
+├── external_connectivity.tf    # IP space (fresh create) + provider gateway
 ├── content_library.tf          # Provider content library + items
 ├── orgs.tf                     # module.orgs + OIDC client mint/rotate (restapi provider)
 ├── org_networking.tf           # module.org_networking
@@ -37,9 +38,10 @@ Credentials are supplied via `TF_VAR_*` (see "Variables not in tfvars" below), n
 
 Read before the first real apply against the lab:
 
-1. **`vcenter_name` is a genuine placeholder** (`envs/lab.tfvars`). VCFA is currently torn down, so the registered display name can't be verified against a live instance. Checked again on 2026-08-02 for a pre-teardown state capture (`docs/state-captures/2026-08-01-vcfa-pre-teardown/` in `lab-admin`) that might record the registered name: that directory is not present on disk in that workspace, so the placeholder stays as-is. Confirm it against the live vCenter before applying.
-2. **External IP space is imported, not created; the imported quota fields are unverified.** See "External CIDR" below: `vcfa_ip_space.ext` now carries an `import {}` block that adopts the teardown-surviving `vcf-lab-region01-default-ip-space` block instead of creating a second one over `172.17.0.0/16`. What's still open is whether `default_quota_max_subnet_size` / `default_quota_max_cidr_count` / `default_quota_max_ip_count` as configured match the live block's actual settings; a plan immediately after import that wants to change any of those three fields means they don't. Run the `workflow_dispatch` plan-only dry run first (see "Dry run before merge" below) and read that resource's plan carefully.
-3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. See "OAuth app redirect/logout URLs" below.
+1. **`roles.tf` is still an empty scaffold.** Capturing which of the pre-teardown lab's custom roles/rights bundles were custom (versus stock) requires diffing against Scott's pre-teardown `vcfa-state.json` capture, which isn't available in this workspace. See "Open decisions" below.
+2. **S3 bucket encryption-at-rest is unconfirmed.** No AWS credentials are available in this workspace to check. See "State is credential-bearing" below.
+3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. The `/oauth/callback` suffix in particular is an unverified guess pending a first real apply. See "OAuth app redirect/logout URLs" below.
+4. **`enable_orgs = false` in `envs/lab.tfvars` is deliberate.** This ships as Scott's phase-1 test (region + external IP space + provider gateway only, no orgs). Flipping it to `true` is the explicit phase-2 go, not something to do silently. See "Phased apply" below.
 
 ## Registry modules consumed
 
@@ -82,15 +84,13 @@ The `Mastercard/restapi` provider models everything as a `restapi_object` (a RES
 
 ## External CIDR
 
-`var.external_cidr` = `172.17.0.0/16`, set in `envs/lab.tfvars`. This was previously believed to collide with the supervisor's default connectivity profile and was left unset (BLOCKING). That was backwards: live vCenter evidence (wld01-cl01-supervisor > Configure > Network > Workload Networks) shows a single External IP Block named `vcf-lab-region01-default-ip-space`, whose name is derived from this repo's region name (`vcf-lab-region01`). This IS the region's own external IP space, not a foreign allocation to avoid. It survived the VCFA teardown and still exists on the supervisor under that name. `172.18.0.0/16`, seen in older docs, was a reservation for a second supervisor (`wld01-cl02-supervisor`) that was never built and doesn't exist; that value is stale.
+`var.external_cidr` = `172.18.0.0/16`, set in `envs/lab.tfvars`, confirmed live and free in NSX (a full ip-blocks listing and a Policy API search both show 5 live blocks total, none matching 172.18.0.0/16 or anything close to it).
 
-**Resolved: the block is imported, not created.** Because `vcf-lab-region01-default-ip-space` already exists (a teardown survivor), `external_connectivity.tf` carries an `import {}` block adopting it into `vcfa_ip_space.ext` rather than declaring a fresh `vcfa_ip_space` over the same CIDR, which is the actual collision this repo would otherwise hit on a first apply (not a hypothetical: the block is confirmed live, so a plain `create` here would either 409 against NSX or silently produce a second block over `172.17.0.0/16`, neither of which is wanted). Confirmed against the published `vmware/vcfa` provider docs (`docs/resources/ip_space.md`, fetched from `github.com/vmware/terraform-provider-vcfa` at the `main` branch on 2026-08-02):
+**This is a fresh create, not an adopt.** `external_connectivity.tf`'s `vcfa_ip_space.ext` creates a brand-new IP space on this CIDR. There is no `import {}` block, no name reuse, and no quota comparison against anything existing: zero contact with 172.17.0.0/16 in any form. This is an additive second entry on the Default VPC Connectivity Profile: the profile's `external_ip_blocks` field is an array (`maxItems: 5`, confirmed against the live schema), and only 1 of 5 slots is currently used, by the untouched 172.17.0.0/16 block.
 
-- The resource exports `is_imported_ip_block`, an explicit signal that adoption of a pre-existing NSX IP Block is a supported, intended posture for this resource, not just a recovery mechanism.
-- The documented import ID format is `<region-name>.<ip-space-name>` (a literal `.`-separated path, configurable via the provider's `import_separator`), which is what the `import {}` block's `id` argument uses here: `"${var.region_name}.${var.region_name}-default-ip-space"`.
-- The resource's `name` argument was changed from the old placeholder computed name (`"${var.region_name}-ipspace01"`) to `"${var.region_name}-default-ip-space"`, matching the live block's actual name, so config and live reality agree post-import.
+`172.17.0.0/16` is a default block from initial vCenter+NSX onboarding. It stays untouched and unmanaged by this repo, permanently: not a hazard to route around, not something the supervisor "owns" in a way this repo needs to avoid, just intentionally out of scope. It was also renamed live (from `vcf-lab-region01-default-ip-space` to `vcf-lab-wld01-default-ip-space`) and had its `vcfa/tenant-manager` NSX tag stripped during an unrelated Supervisor decommission/rebuild cycle; neither its old nor new name is something this repo references or adopts.
 
-**Still open: whether the declared quota fields match the live block.** `default_quota_max_subnet_size = 24`, `default_quota_max_cidr_count = -1`, `default_quota_max_ip_count = -1` are the values carried over from the original sketch, not confirmed against the live block's actual configuration: this workspace has no API access to read it back. An import followed by a plan that immediately wants to change any of these three fields is not a clean adoption, it's a disguised recreate-in-place; read that resource's plan carefully on the first `terraform plan` after this merges (see pre-apply checklist above).
+The `default_quota_max_subnet_size = 24`, `default_quota_max_cidr_count = -1`, `default_quota_max_ip_count = -1` fields on `vcfa_ip_space.ext` are the operator's chosen defaults for this brand-new IP space, not something being matched against a live block: there's no live block here to match against.
 
 ## VCFA provider auth
 
@@ -139,12 +139,11 @@ No true "unlimited" sentinel is documented for `vcfa_org_region_quota`'s `cpu_li
 
 ## Open decisions carried over from the spec
 
-1. **External IP space quota fields**: unverified against the live block, see "External CIDR" above. The collision itself is resolved (import, not create).
-2. **Custom roles/rights capture** (`roles.tf`): left as an empty/scaffolded file. Capturing which of the pre-teardown lab's 5 global roles, 28 rights bundles, and 6 provider roles were custom (versus stock, which should not be redeclared) requires diffing against Scott's pre-teardown `vcfa-state.json` capture. Checked again on 2026-08-02 for `docs/state-captures/2026-08-01-vcfa-pre-teardown/` in `lab-admin`: still not present on disk in that workspace, so this stays scaffolded, not guessed.
-3. **SupervisorNamespaceClasses module placement**: not built here (out of scope for this repo per spec 3.9). Open: module lives here, or in the org tenant repos (`vm-apps-private-cloud` / `all-apps-private-cloud`)?
-4. **`hol-scitech` ownership**: does it live in `var.orgs` here, or get created by the hand-off python so the pod maintainer sees the whole flow end to end? Not included in `envs/lab.tfvars` pending this answer.
-5. **OAuth app redirect URL**: guessed, see "OAuth app redirect/logout URLs" above, needs reconciling against `module.orgs[*].oidc_redirect_uri` after a first apply.
-6. **`VCF_OPS_API_BASE_URL` secret**: referenced by the workflow (`TF_VAR_ops_api_base_url`) but not in the list of secrets Scott confirmed as created. UNRESOLVED whether it already exists under this name in the repo's Settings > Secrets: if not, it needs creating before the credentialed job can run.
+1. **Custom roles/rights capture** (`roles.tf`): left as an empty/scaffolded file. Capturing which of the pre-teardown lab's 5 global roles, 28 rights bundles, and 6 provider roles were custom (versus stock, which should not be redeclared) requires diffing against Scott's pre-teardown `vcfa-state.json` capture. Checked again on 2026-08-02 for `docs/state-captures/2026-08-01-vcfa-pre-teardown/` in `lab-admin`: still not present on disk in that workspace, so this stays scaffolded, not guessed.
+2. **SupervisorNamespaceClasses module placement**: not built here (out of scope for this repo per spec 3.9). Open: module lives here, or in the org tenant repos (`vm-apps-private-cloud` / `all-apps-private-cloud`)?
+3. **`hol-scitech` ownership**: does it live in `var.orgs` here, or get created by the hand-off python so the pod maintainer sees the whole flow end to end? Not included in `envs/lab.tfvars` pending this answer.
+4. **OAuth app redirect URL**: guessed, see "OAuth app redirect/logout URLs" above, needs reconciling against `module.orgs[*].oidc_redirect_uri` after a first apply.
+5. **`VCF_OPS_API_BASE_URL` secret**: referenced by the workflow (`TF_VAR_ops_api_base_url`) but not in the list of secrets Scott confirmed as created. UNRESOLVED whether it already exists under this name in the repo's Settings > Secrets: if not, it needs creating before the credentialed job can run.
 
 ## Repo secrets the workflow expects
 
@@ -160,7 +159,16 @@ No other secrets should be referenced anywhere in the workflow. In particular `V
 
 ## Dry run before merge
 
-Merging to `main` triggers `plan-and-apply` with `-auto-approve` against the real lab; there's no separate deploy step. `workflow_dispatch` now runs the same credentialed job as a **plan-only dry run by default** (an `apply` boolean input, default `false`): init + plan against real credentials, plan printed to the log, nothing applied. Set `apply: true` on the manual run to also apply. `push` to `main` keeps applying unconditionally, unaffected by the new input. This matters concretely for this repo: `vcenter_name` is an unverified placeholder and the external CIDR's collision posture is unresolved (see "Pre-apply checklist" above) — a plan-only dry run is how those get caught before a half-built region, instead of the first real plan being the one that's already applying.
+Merging to `main` triggers `plan-and-apply` with `-auto-approve` against the real lab; there's no separate deploy step. `workflow_dispatch` now runs the same credentialed job as a **plan-only dry run by default** (an `apply` boolean input, default `false`): init + plan against real credentials, plan printed to the log, nothing applied. Set `apply: true` on the manual run to also apply. `push` to `main` keeps applying unconditionally, unaffected by the new input. This matters concretely for this repo: the items in "Pre-apply checklist" above are still genuinely open. A plan-only dry run is how those get caught before a half-built region, instead of the first real plan being the one that's already applying.
+
+## Phased apply
+
+`var.enable_orgs` (`variables.tf`, gated through `local.effective_orgs` in `locals.tf`) lets Scott apply this repo in two phases instead of all at once:
+
+- **Phase 1** (`enable_orgs = false`, the current committed default in `envs/lab.tfvars`): region, external IP space, provider gateway, and content library only. No orgs, no org networking, no region quotas, no OIDC/OAuth client minting.
+- **Phase 2** (`enable_orgs = true`): everything in phase 1, plus `module.orgs`, `module.org_networking`, `vcfa_org_region_quota`, and the OAuth app mint/rotate resources, for every org in `var.orgs`.
+
+`var.orgs` itself is never emptied or hand-edited to move between phases: the full org config stays committed and ready in `envs/lab.tfvars`, and `enable_orgs` alone decides whether it gets built. Flipping it to `true` is an explicit phase-2 go, not something to do as a drive-by change.
 
 Security posture unchanged: `lint`'s fork-gating on `pull_request` is untouched, no secrets are ever exposed on `pull_request` events, no plan file is ever uploaded as a workflow artifact (including the new plan-only path), and the unconditional workspace cleanup step still runs after the credentialed job regardless of outcome.
 

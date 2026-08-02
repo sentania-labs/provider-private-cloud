@@ -2,14 +2,25 @@
 # secrets. See README.md for the full list of values that must be supplied
 # separately via TF_VAR_* before a first apply.
 
-vcfa_url           = "https://vcf-lab-automation.int.sentania.net"
-vcenter_name       = "vcf-lab-vcenter-wld01" # PLACEHOLDER: confirm exact registered vCenter name
+vcfa_url = "https://vcf-lab-automation.int.sentania.net"
+# vCenter-attested value (VirtualCenter.InstanceName, read live via govc).
+# Not yet independently confirmed via a live VCFA data.vcfa_vcenter lookup,
+# since no live VCFA session was obtainable at the time this was set;
+# data.vcfa_vcenter in region.tf will re-confirm or correct this on the
+# first real plan.
+vcenter_name       = "vcf-lab-vcenter-wld01.int.sentania.net"
 nsx_manager_name   = "vcf-lab-nsxmgr-wld01.int.sentania.net"
 supervisor_name    = "wld01-cl01-supervisor"
 tier0_gateway_name = "vcf-lab-wld01-gw"
 
 region_name          = "vcf-lab-region01"
 storage_policy_names = ["iscsi-default-policy"]
+
+# Scott's phased apply plan: phase 1 is region + external IP space +
+# provider gateway only, no orgs. Ships false for that phase-1 test;
+# flipping to true is the explicit phase-2 go, not something to flip
+# silently.
+enable_orgs = false
 
 # Realm "VCF Lab", the only realm on the appliance (Ops 9.1.0.0 build
 # 25541561). An identifier, not a secret: committed here instead of
@@ -20,11 +31,11 @@ sso_realm_id = "83369e94-bcad-4674-ba0d-e4b8b70730ee"
 oidc_wellknown_endpoint = "https://vcf-lab-idb.int.sentania.net/acs/t/CUSTOMER/.well-known/openid-configuration"
 
 
-# Resolved (was BLOCKING): live vCenter evidence shows this is the region's
-# own surviving External IP Block (see external_connectivity.tf and README's
-# "External CIDR" section for the pre-apply collision check this still
-# leaves open).
-external_cidr = "172.17.0.0/16"
+# Fresh, unused CIDR for a brand-new external IP space (see
+# external_connectivity.tf and README's "External CIDR" section): confirmed
+# live and free in NSX, zero contact with the untouched 172.17.0.0/16
+# onboarding block.
+external_cidr = "172.18.0.0/16"
 
 content_libraries = {
   provider_library = {

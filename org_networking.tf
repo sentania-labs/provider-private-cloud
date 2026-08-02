@@ -11,7 +11,7 @@
 module "org_networking" {
   source   = "sentania-labs/org-networking/vcfa"
   version  = "~> 0.1.0"
-  for_each = { for k, o in var.orgs : k => o if o.networking != null }
+  for_each = { for k, o in local.effective_orgs : k => o if o.networking != null }
 
   org_id              = module.orgs[each.key].id
   log_name            = each.value.networking.log_name

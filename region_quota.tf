@@ -14,7 +14,7 @@
 # correct by construction; destroy order is the operator's job to respect).
 
 locals {
-  region_quota_orgs = { for k, o in var.orgs : k => o if o.region_quota != null }
+  region_quota_orgs = { for k, o in local.effective_orgs : k => o if o.region_quota != null }
 
   region_quota_vm_classes = {
     for i in flatten([
@@ -63,6 +63,11 @@ data "vcfa_region_storage_policy" "this" {
   name      = each.value.storage_class
 }
 
+# Checked against the VCF 9.1 restriction on region quotas for VM-Apps-
+# classified orgs: neither the org/vcfa module (~> 0.1.0) nor the vcfa
+# provider's vcfa_org resource (v1.2) exposes an org_type/classification
+# argument, so there is no path in this repo that could create a
+# VM-Apps-restricted org; not applicable here.
 resource "vcfa_org_region_quota" "this" {
   for_each = local.region_quota_orgs
 
