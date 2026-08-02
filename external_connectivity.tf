@@ -3,10 +3,18 @@
 # gateways are region-scoped but shareable across orgs; this one instance
 # serves all orgs in var.orgs.
 #
-# BLOCKING: var.external_cidr has no default, see variables.tf and README.
-# It must be confirmed against the T0's BGP neighbours/advertised prefixes
-# before a first apply; it must not collide with 172.17.0.0/16, which the
-# supervisor's default connectivity profile already uses.
+# external_cidr = 172.17.0.0/16 (envs/lab.tfvars): live vCenter evidence
+# (wld01-cl01-supervisor > Configure > Network > Workload Networks) shows a
+# single External IP Block named "vcf-lab-region01-default-ip-space", whose
+# name is derived from this repo's region name. This IS the region's own
+# external IP space, not a foreign allocation to avoid colliding with. It
+# survived the VCFA teardown and still exists on the supervisor under that
+# name. 172.18.0.0/16, seen in older docs, was a reservation for a second
+# supervisor (wld01-cl02-supervisor) that was never built; that value is
+# stale and unused. See README's "External CIDR" section for the pre-apply
+# check this leaves open: whether creating vcfa_region + vcfa_ip_space
+# against a CIDR that already has a surviving block on the supervisor
+# collides, or is adopted/expected.
 
 data "vcfa_tier0_gateway" "t0" {
   name      = var.tier0_gateway_name

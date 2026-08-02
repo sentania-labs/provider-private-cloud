@@ -8,19 +8,16 @@ variable "vcfa_url" {
 }
 
 /**
- * vcfa_admin_username / vcfa_admin_password
- * Username/password auth is the verified-working path for this repo (System org
- * admin, e.g. admin@system), not the api_token flow: the token in the pre-teardown
- * lab-config.json is stale. Supplied via TF_VAR_*, never defaulted or committed.
+ * vcfa_api_token
+ * VCF Admin service-account API token, issued from the provider portal, scoped to
+ * org "System" (matches the api_token auth pattern used by the sibling repos'
+ * vcfa provider blocks). Supplied via TF_VAR_vcfa_api_token, never defaulted or
+ * committed. The earlier username/password path (admin@system) is retired: the
+ * token in the pre-teardown lab-config.json was stale, this is a freshly issued one.
  */
-variable "vcfa_admin_username" {
+variable "vcfa_api_token" {
   type        = string
-  description = "System-org admin username for the vcfa provider (e.g. admin@system)."
-}
-
-variable "vcfa_admin_password" {
-  type        = string
-  description = "Password for var.vcfa_admin_username. Supply via TF_VAR_vcfa_admin_password."
+  description = "API token for the vcfa provider, org System (VCF Admin service account). Supply via TF_VAR_vcfa_api_token."
   sensitive   = true
 }
 
@@ -49,15 +46,28 @@ variable "ops_api_base_url" {
   sensitive   = true
 }
 
+/**
+ * ops_api_token
+ * Short-lived Ops API token, acquired at CI runtime from VCF_LAB_OPS_USER /
+ * VCF_LAB_OPS_PASSWORD via a login round-trip the restapi provider cannot do
+ * itself (see .github/workflows/configure-private-cloud.yml's acquire step and
+ * README's "Ops API auth" section). Sent as "OpsToken <token>", not "Bearer".
+ */
 variable "ops_api_token" {
   type        = string
-  description = "Bearer token for the VCF Operations fleet-management IAM API. Supply via TF_VAR_ops_api_token."
+  description = "Ops API token for the VCF Operations fleet-management IAM API, sent as an OpsToken header. Supply via TF_VAR_ops_api_token (acquired at CI runtime, not stored)."
   sensitive   = true
 }
 
+/**
+ * sso_realm_id
+ * Identifier, not a secret: supplied by envs/*.tfvars (ruling: a working system
+ * ships with reasonable defaults, no hand-population via TF_VAR required to run).
+ * See envs/lab.tfvars for the lab's realm id and its provenance.
+ */
 variable "sso_realm_id" {
   type        = string
-  description = "SSO realm id under which per-org OAuth apps are created (fleet-management/iam/ssorealms/{ssoRealmId}). Supplied later, during the lab-admin phase: no default."
+  description = "SSO realm id under which per-org OAuth apps are created (fleet-management/iam/ssorealms/{ssoRealmId}). Set in envs/*.tfvars, not TF_VAR."
 }
 
 ########################################
@@ -92,7 +102,7 @@ variable "storage_policy_names" {
 }
 
 ########################################
-# External connectivity (spec 3.2) -- BLOCKING, see README
+# External connectivity (spec 3.2)
 ########################################
 
 variable "tier0_gateway_name" {
@@ -102,15 +112,13 @@ variable "tier0_gateway_name" {
 
 /**
  * external_cidr
- * BLOCKING open decision (spec section 3.2 / section 9 item 1): needs a router-side
- * answer confirming a range that is routed to the T0 and does not collide with
- * 172.17.0.0/16 (in use by the supervisor's default connectivity profile). No default
- * on purpose, so an apply without an explicit answer fails closed instead of silently
- * reusing a stale or colliding block.
+ * Resolved: 172.17.0.0/16, the region's own surviving External IP Block (see
+ * external_connectivity.tf and README's "External CIDR" section). Set in
+ * envs/lab.tfvars, no default here since it is env-specific topology.
  */
 variable "external_cidr" {
   type        = string
-  description = "CIDR block for the region's external IP space. BLOCKING: must be confirmed against the T0's BGP neighbours/advertised prefixes before use, see README."
+  description = "CIDR block for the region's external IP space. See README's External CIDR section for the pre-apply collision check against the surviving supervisor-side block."
 }
 
 ########################################
@@ -128,6 +136,46 @@ variable "content_libraries" {
   }))
   description = "Provider content libraries and their items. storage_class_names are resolved to storage class ids in the region (vcfa_content_library requires storage_class_ids, not a region reference)."
   default     = {}
+}
+
+/**
+ * oidc_wellknown_endpoint
+ * Well-known OIDC discovery URL for the vIDB realm, shared by every org's OIDC
+ * federation. Confirmed live: resolves to
+ * https://vcf-lab-idb.int.sentania.net/acs/t/CUSTOMER/.well-known/openid-configuration
+ * Kept as a plain committed value (not a data-source lookup): the restapi
+ * provider's restapi_object data source is built for list-search responses
+ * (search_key/search_value/results_key), and this endpoint returns a single
+ * object, not an array -- that shape mismatch isn't a reasonable fit, so a
+ * static, live-validated value is used instead. See README.
+ */
+variable "oidc_wellknown_endpoint" {
+  type        = string
+  description = "Well-known OIDC discovery URL for the vIDB realm shared by all orgs' OIDC federation."
+}
+
+/**
+ * oauth_app_redirect_url_pattern / oauth_app_logout_url_pattern
+ * format() patterns applied as format(pattern, vcfa_url, org_name) when creating
+ * each org's OAuth app (orgs.tf). Logout returns to the tenant sign-in page per
+ * Scott's ruling. The logout pattern ("%s/tenant/%s") is VCFA's confirmed tenant
+ * context URL convention. The redirect pattern's callback suffix
+ * ("%s/tenant/%s/oauth/callback") is NOT confirmed against a live OIDC client
+ * registration -- VCFA computes its own true redirect URI only after
+ * vcfa_org_oidc federation is created (module.orgs[*].oidc_redirect_uri), which
+ * happens after this OAuth app is created, so this is a best-effort guess.
+ * Override via -var if the real value differs after a first apply.
+ */
+variable "oauth_app_redirect_url_pattern" {
+  type        = string
+  description = "format() pattern (vcfa_url, org_name) for each org's OAuth app redirect URL. Guessed VCFA OIDC callback path, see README."
+  default     = "%s/tenant/%s/oauth/callback"
+}
+
+variable "oauth_app_logout_url_pattern" {
+  type        = string
+  description = "format() pattern (vcfa_url, org_name) for each org's OAuth app logout URL. Points at the tenant sign-in page."
+  default     = "%s/tenant/%s"
 }
 
 ########################################

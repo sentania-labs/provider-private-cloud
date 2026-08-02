@@ -1,10 +1,9 @@
 provider "vcfa" {
   url                  = var.vcfa_url
-  user                 = var.vcfa_admin_username
-  password             = var.vcfa_admin_password
+  api_token            = var.vcfa_api_token
   org                  = "System"
   allow_unverified_ssl = var.insecure
-  auth_type            = "integrated"
+  auth_type            = "api_token"
 }
 
 # Mints/rotates per-org OIDC client secrets via the VCF Operations IAM API
@@ -17,7 +16,7 @@ provider "restapi" {
   write_returns_object  = true
   create_returns_object = true
   headers = {
-    "Authorization" = "Bearer ${var.ops_api_token}"
+    "Authorization" = "OpsToken ${var.ops_api_token}"
     "Content-Type"  = "application/json"
   }
 }

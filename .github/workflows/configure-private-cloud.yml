@@ -7,6 +7,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply after plan (unchecked = plan-only dry run against real credentials)"
+        type: boolean
+        default: false
 
 jobs:
   # Runs on every push and PR (fork-gated). No secrets: fmt-check and a
@@ -35,15 +40,23 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
-  # Push-to-main only: this is the sole job that ever sees production
-  # secrets (AWS for the S3 backend, VCFA admin credentials, Ops API
-  # credentials). A saved terraform plan for this repo is credential-bearing
-  # (VCFA admin password, Ops API token in root variables; OIDC client
-  # secrets in refreshed state), so it is neither uploaded as an artifact
-  # nor left on disk: plan and apply happen back-to-back in the same step,
-  # and cleanup runs unconditionally afterward regardless of outcome.
+  # Runs on push to main (always applies) and on workflow_dispatch (plan-only
+  # by default, applies only if the `apply` input is explicitly set true).
+  # This is the sole job that ever sees production secrets (AWS for the S3
+  # backend, VCFA API token, Ops API username/password). A saved terraform
+  # plan for this repo is credential-bearing (OIDC client secrets appear in a
+  # plan that touches an existing org's federation), so it is neither
+  # uploaded as an artifact nor left on disk: plan and apply happen back-to-
+  # back in the same step, and cleanup runs unconditionally afterward
+  # regardless of outcome.
+  #
+  # workflow_dispatch plan-only exists because push-to-main applies with
+  # -auto-approve and there was previously no way to see a real, credentialed
+  # plan before that first live apply -- see README's "Dry-run before merge"
+  # section for why that mattered here specifically (unverified vcenter_name
+  # placeholder, and the external CIDR's surviving supervisor-side block).
   plan-and-apply:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: lint
     runs-on: [self-hosted, terraform]
 
@@ -55,15 +68,13 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
 
-      # VCFA System-org admin auth (username/password, not api_token: see
-      # README's "why username/password" note).
-      TF_VAR_vcfa_admin_username: ${{ secrets.VCF_LAB_SYSTEM_ADMIN_USERNAME }}
-      TF_VAR_vcfa_admin_password: ${{ secrets.VCF_LAB_SYSTEM_ADMIN_PASSWORD }}
+      # vcfa provider api_token auth (VCF Admin service account, provider portal).
+      TF_VAR_vcfa_api_token: ${{ secrets.VCF_LAB_PROVIDER_REFRESH_KEY }}
 
       # VCF Operations IAM API (OIDC client minting/rotation, see orgs.tf).
+      # ops_api_token is NOT a stored secret: it's a short-lived token acquired
+      # at runtime by the step below and exported via GITHUB_ENV.
       TF_VAR_ops_api_base_url: ${{ secrets.VCF_OPS_API_BASE_URL }}
-      TF_VAR_ops_api_token: ${{ secrets.VCF_OPS_API_TOKEN }}
-      TF_VAR_sso_realm_id: ${{ secrets.VCF_OPS_SSO_REALM_ID }}
 
       # local_admin_passwords is a map(string): an unset secret resolves to
       # an empty string, which is not valid HCL/JSON for a complex-typed
@@ -71,26 +82,50 @@ jobs:
       # falling back to the variable's own default. Fall back to '{}' here
       # instead.
       TF_VAR_local_admin_passwords: ${{ secrets.VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS || '{}' }}
-      TF_VAR_external_cidr: ${{ secrets.VCF_LAB_EXTERNAL_CIDR }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Terraform Init
-        run: terraform init -migrate-state -input=false
+      # The restapi provider can't do a login round-trip itself, and Ops
+      # tokens are short-lived and acquired, not stored: VCF_LAB_OPS_USER /
+      # VCF_LAB_OPS_PASSWORD are the stored secrets, this step exchanges them
+      # for a token before any terraform step runs. See README's "Ops API
+      # auth" section.
+      - name: Acquire Ops API token
+        run: |
+          token=$(curl -sf -X POST "${{ secrets.VCF_OPS_API_BASE_URL }}/suite-api/api/auth/token/acquire" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${{ secrets.VCF_LAB_OPS_USER }}\",\"password\":\"${{ secrets.VCF_LAB_OPS_PASSWORD }}\"}" \
+            | jq -r '.token')
+          echo "::add-mask::$token"
+          echo "TF_VAR_ops_api_token=$token" >> "$GITHUB_ENV"
 
-      - name: Terraform Plan and Apply
+      # Plain init, not -migrate-state: that flag is for migrating between
+      # backend configurations (e.g. changing backend.tf's bucket/key), and
+      # this repo's remote state doesn't exist yet for its first-ever apply.
+      # A plain init still creates the state object on first run.
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan
         run: |
               terraform plan -input=false -no-color \
               -var-file="envs/lab.tfvars" \
               -out=tfplan
-              terraform apply -input=false -auto-approve tfplan
+
+      # Only applies on push to main, or on workflow_dispatch with apply=true.
+      # A workflow_dispatch run with the toggle left at its false default
+      # stops here: plan output is already in the step above's log, tfplan
+      # is never applied, and the cleanup step below still removes it.
+      - name: Terraform Apply
+        if: github.event_name == 'push' || inputs.apply == true
+        run: terraform apply -input=false -auto-approve tfplan
 
       # Unconditional: the local plan file (tfplan) carries the same
       # sensitive root-variable values as the apply above and must not
       # survive on this persistent self-hosted runner regardless of whether
-      # plan/apply succeeded or failed.
+      # plan/apply succeeded, failed, or was skipped as plan-only.
       - name: Clean workspace
         if: always()
         run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete
