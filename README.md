@@ -20,7 +20,7 @@ provider-private-cloud/
 ├── region_quota.tf             # vcfa_org_region_quota, direct resource (not a module)
 ├── roles.tf                    # Custom roles/rights only (scaffolded, see below)
 ├── envs/                       # Environment tfvars (non-secret topology only)
-└── .github/workflows/          # CI: fmt-check -> init -> validate -> plan -> apply (main only)
+└── .github/workflows/          # CI: lint (fmt-check + backend-less validate, no secrets) -> plan+apply (push to main only, credentialed)
 ```
 
 ## Usage
@@ -81,7 +81,7 @@ The `Mastercard/restapi` provider models everything as a `restapi_object` (a RES
 2. **Custom roles/rights capture** (`roles.tf`): left as an empty/scaffolded file. Capturing which of the pre-teardown lab's 5 global roles, 28 rights bundles, and 6 provider roles were custom (versus stock, which should not be redeclared) requires diffing against Scott's pre-teardown `vcfa-state.json` capture, which isn't available in this workspace.
 3. **SupervisorNamespaceClasses module placement**: not built here (out of scope for this repo per spec 3.9). Open: module lives here, or in the org tenant repos (`vm-apps-private-cloud` / `all-apps-private-cloud`)?
 4. **`hol-scitech` ownership**: does it live in `var.orgs` here, or get created by the hand-off python so the pod maintainer sees the whole flow end to end? Not included in `envs/lab.tfvars` pending this answer.
-5. **CI auth**: this workflow uses repo secrets (`TF_VAR_*` env vars), matching the sibling repos' pattern, rather than `workflow_dispatch` inputs, since `push`-to-`main` applies need credentials without a human present to supply them. Revisit if that assumption is wrong for this repo's operational model.
+5. **CI auth**: this workflow uses repo secrets (`TF_VAR_*` env vars), matching the sibling repos' pattern, rather than `workflow_dispatch` inputs, since `push`-to-`main` applies need credentials without a human present to supply them. Revisit if that assumption is wrong for this repo's operational model. Unlike the sibling repos, those secrets are scoped to a push-to-`main`-only job: because this repo's state and plans are credential-bearing (VCFA admin password, Ops API token, minted OIDC client secrets), `pull_request` runs only get a secret-free fmt-check and backend-less validate, never a real plan.
 
 ## License
 
