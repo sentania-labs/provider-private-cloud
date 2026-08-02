@@ -31,7 +31,12 @@ jobs:
       TF_VAR_ops_api_token: ${{ secrets.VCF_OPS_API_TOKEN }}
       TF_VAR_sso_realm_id: ${{ secrets.VCF_OPS_SSO_REALM_ID }}
 
-      TF_VAR_local_admin_passwords: ${{ secrets.VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS }}
+      # local_admin_passwords is a map(string): an unset secret resolves to
+      # an empty string, which is not valid HCL/JSON for a complex-typed
+      # TF_VAR and breaks `terraform plan` with a parse error rather than
+      # falling back to the variable's own default. Fall back to '{}' here
+      # instead.
+      TF_VAR_local_admin_passwords: ${{ secrets.VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS || '{}' }}
       TF_VAR_external_cidr: ${{ secrets.VCF_LAB_EXTERNAL_CIDR }}
 
     steps:
