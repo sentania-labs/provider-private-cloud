@@ -29,10 +29,15 @@ resource "restapi_object" "oauth_app" {
 
   path          = "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps"
   create_method = "POST"
-  id_attribute  = "clientId"
+  # oauth-apps objects carry two distinct identifiers: `id` (what every API
+  # path parameter, including rotate, actually wants) and `clientId` (the
+  # OAuth client id used in the OIDC handshake). id_attribute must be "id"
+  # so .id resolves to the value the API's paths expect. Confirmed live:
+  # GET/rotate by clientId 404s ("No such id"), GET/rotate by id works.
+  id_attribute = "id"
 
   data = jsonencode({
-    clientName   = "${each.value.name}-oidc"
+    clientName   = "VCFA - ${each.value.name}"
     description  = "OIDC client for VCFA org ${each.value.name}, managed by provider-private-cloud."
     redirectUrls = [format(var.oauth_app_redirect_url_pattern, var.vcfa_url, each.value.name)]
     logoutUrls   = [format(var.oauth_app_logout_url_pattern, var.vcfa_url, each.value.name)]
@@ -44,6 +49,9 @@ locals {
   # in the resource below) because a resource block cannot reference its
   # own other arguments, and this same path is used for both the create
   # and update method overrides.
+  #
+  # .id below is the object id now that id_attribute above is "id"; this
+  # reference didn't need to change, only what it resolves to did.
   oauth_app_rotate_path = {
     for k, o in local.oidc_orgs :
     k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}/rotate"
@@ -117,7 +125,12 @@ module "orgs" {
   local_admin_password = null
 
   oidc = each.value.oidc == null ? null : {
-    client_id              = restapi_object.oauth_app[each.key].id
+    # .id is the object id (see id_attribute above); the OIDC handshake
+    # needs clientId instead, read from api_data (populated from the
+    # create/read response via write_returns_object/create_returns_object
+    # in provider.tf). clientId is a plain string field, so api_data's
+    # fmt-formatted map entry for it is the value as-is.
+    client_id              = restapi_object.oauth_app[each.key].api_data["clientId"]
     wellknown_endpoint     = var.oidc_wellknown_endpoint
     scopes                 = each.value.oidc.scopes
     ui_button_label        = each.value.oidc.ui_button_label
