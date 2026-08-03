@@ -73,8 +73,43 @@ resource "restapi_object" "oauth_app" {
   # into the org's OIDC config (oidc_client_secret, below): that cascade is
   # intentional given how the secret is wired downstream, not a bug to work
   # around.
+  #
+  # create_method, id_attribute, ignore_all_server_changes, and debug are
+  # provider-local attributes: the restapi provider tracks them in state to
+  # remember how it should manage the object, but none of them describe
+  # anything the API server holds, and none of them affect anything
+  # observable outside this provider's own bookkeeping. An import (see the
+  # state_import escape hatch above) leaves them unset in the imported
+  # state, which then shows up as a plan diff against this config on the
+  # next run even though nothing about the object changed. This resource
+  # has no working PUT (see above): resourceRestAPIUpdate in the v2.0.1
+  # source calls updateObject() unconditionally whenever ANY tracked
+  # attribute has a diff, not only when data changes, so leaving any one of
+  # these four unignored produces the same broken-PUT 500 as a real data
+  # change would. ignore_changes on all four, same as on data, keeps config
+  # authoritative for new creates while leaving already-imported state
+  # alone. Confirmed against run 30840012739's residual diff: create_method,
+  # id_attribute, and ignore_all_server_changes appearing as "+ create" and
+  # debug as "-> null" were the only remaining changes once data was
+  # already ignored, and after this change none of the four show up on a
+  # plan against that same state.
+  #
+  # debug's credential-logging risk was raised in review and considered
+  # explicitly, not overlooked: setting debug = false in config so it stays
+  # authoritative (rather than ignoring it) was tried and rejected, because
+  # that reintroduces exactly the failure this resource's other three
+  # ignore_changes entries exist to avoid (config-vs-state diff -> PUT ->
+  # 500), and a targeted replace to clear a stale imported true mints a new
+  # clientId and cascades churn through the org's live OIDC config, which
+  # is worse than the risk it would fix. The risk itself doesn't apply
+  # here: the restapi provider's debug output goes through Go's
+  # log.Printf, which Terraform only surfaces as provider logs when TF_LOG
+  # is set on the run; this pipeline never sets TF_LOG, so nothing is
+  # printed regardless of what value debug holds in state, imported or
+  # otherwise. ignore_changes on debug is therefore safe: the flag's value
+  # has no observable effect in this environment either way.
   lifecycle {
-    ignore_changes = [data]
+    ignore_changes = [data, create_method, id_attribute, ignore_all_server_changes, debug]
   }
 }
 
