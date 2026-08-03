@@ -123,27 +123,6 @@ variable "external_cidr" {
   description = "CIDR block for the region's external IP space. See README's External CIDR section: this is a fresh IP space created on this CIDR, not adopted from anything existing."
 }
 
-########################################
-# Provider content library (spec 3.3)
-########################################
-
-variable "content_libraries" {
-  type = map(object({
-    name                = string
-    storage_class_names = list(string)
-    items = optional(list(object({
-      name       = string
-      file_paths = list(string)
-    })), [])
-    subscription_config = optional(object({
-      subscription_url = string
-      password         = optional(string)
-    }))
-  }))
-  description = "Provider content libraries and their items. storage_class_names are resolved to storage class ids in the region (vcfa_content_library requires storage_class_ids, not a region reference). subscription_config turns a library into a subscribed library pulling content from a publisher; subscription_url forces replacement if changed after creation (provider ForceNew), and items should stay empty for a subscribed library since content comes from the publisher."
-  default     = {}
-}
-
 /**
  * oidc_wellknown_endpoint
  * Well-known OIDC discovery URL for the vIDB realm, shared by every org's OIDC
@@ -193,15 +172,15 @@ variable "oauth_app_logout_url_pattern" {
  * Phase-1/phase-2 rollout gate for Scott's staged apply plan. When false,
  * every org-scoped resource (module.orgs, org networking, region quotas,
  * OIDC/OAuth client minting) is skipped: only the region, external IP
- * space, provider gateway, and content library get built. content_library.tf
- * is provider-scoped (System org), not org-scoped, and always builds
- * regardless of this flag. See locals.tf's local.effective_orgs, which is
- * what actually gates for_each in orgs.tf / org_networking.tf /
+ * space, and provider gateway get built. The provider content library is
+ * no longer part of this root at all: it lives in its own apply stage
+ * (content/), unaffected by this flag. See locals.tf's local.effective_orgs,
+ * which is what actually gates for_each in orgs.tf / org_networking.tf /
  * region_quota.tf; var.orgs itself is never emptied.
  */
 variable "enable_orgs" {
   type        = bool
-  description = "When false, org-scoped resources (module.orgs, org networking, region quotas, OIDC/OAuth client minting) are skipped; only region, external IP space, provider gateway, and content library are built. This is the phase-1/phase-2 rollout gate."
+  description = "When false, org-scoped resources (module.orgs, org networking, region quotas, OIDC/OAuth client minting) are skipped; only region, external IP space, and provider gateway are built. This is the phase-1/phase-2 rollout gate. The content library is a separate apply stage (content/), unaffected by this flag."
   default     = true
 }
 
