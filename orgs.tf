@@ -58,6 +58,24 @@ resource "restapi_object" "oauth_app" {
     redirectUrls = [format(var.oauth_app_redirect_url_pattern, var.vcfa_url, each.value.name)]
     logoutUrls   = [format(var.oauth_app_logout_url_pattern, var.vcfa_url, each.value.name)]
   })
+
+  # The Ops IAM oauth-apps API has no update operation: create (POST), read
+  # (single/list GET), and rotate (POST) only, confirmed against the live
+  # API on 2026-08-03 (a PUT here returns 500 "Internal Server error, cause
+  # unknown" for every field, not a validation error on any one of them).
+  # ignore_changes on data stops Terraform from ever attempting that PUT
+  # because of drift between imported state and this resource's config
+  # (clientName, redirectUrls, logoutUrls). A real payload change still
+  # needs to reach the server: do that with a targeted replace instead of
+  # editing data in place, e.g.
+  #   terraform apply -replace='restapi_object.oauth_app["<key>"]'
+  # This recreates the OAuth app and cascades a new clientId/clientSecret
+  # into the org's OIDC config (oidc_client_secret, below): that cascade is
+  # intentional given how the secret is wired downstream, not a bug to work
+  # around.
+  lifecycle {
+    ignore_changes = [data]
+  }
 }
 
 locals {
