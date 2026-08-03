@@ -13,6 +13,22 @@ locals {
   local_admin_orgs = { for k, o in local.effective_orgs : k => o if o.local_admin != null }
 }
 
+# Recovery path for the failure mode the CLI state_import escape hatch can't
+# reach: with an org's restapi_object.oauth_app instance missing from state,
+# this file's other references to it (oauth_app_rotate_path's local below,
+# module.orgs' client_id input) fail at eval time with "Invalid index" before
+# a `terraform import` CLI call ever gets to commit anything. An import
+# block doesn't have that problem because it's evaluated as part of the plan
+# graph itself: a missing instance becomes a planned create/import for that
+# resource, not a hard eval-time error on the cross-references elsewhere in
+# this file. var.oauth_app_imports is empty by default, so this block is a
+# no-op in normal operation. See README's escape-hatch section.
+import {
+  for_each = var.oauth_app_imports
+  to       = restapi_object.oauth_app[each.key]
+  id       = each.value
+}
+
 # Creates one OAuth App per org under the Ops SSO realm. The create response
 # (clientId, clientSecret, issuerUrl) is captured via write_returns_object /
 # create_returns_object on the provider (see provider.tf).

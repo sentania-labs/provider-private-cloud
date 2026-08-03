@@ -20,6 +20,10 @@ on:
         description: "Optional: space or comma separated addr=id pairs to `terraform import` after state_rm and before planning (e.g. re-importing an object that state surgery removed by mistake)"
         type: string
         default: ""
+      oauth_app_imports:
+        description: "Optional: JSON map of org key to full OAuth-app API path, passed through to TF_VAR_oauth_app_imports for the import-block recovery path (distinct from state_import: use this when a restapi_object.oauth_app entry is missing from state, since state_import's CLI import fails eval on that resource's cross-references)"
+        type: string
+        default: ""
 
 jobs:
   # Runs on every push and PR (fork-gated). No secrets: fmt-check and a
@@ -273,6 +277,31 @@ jobs:
               terraform import -var-file="envs/lab.tfvars" -- "$addr" "$id"
             done
           done
+
+      # Optional manual escape hatch, distinct from state_import above: an
+      # import-block based recovery path for restapi_object.oauth_app
+      # specifically. See orgs.tf's `import` block and README's escape-hatch
+      # section for why this resource needs a different recovery mechanism
+      # than the CLI state_import step (a missing oauth_app instance makes
+      # this file's own cross-references to it fail at eval time before a
+      # CLI import ever commits; an import block is evaluated as part of the
+      # plan graph and doesn't hit that problem). The input is already JSON
+      # shaped for var.oauth_app_imports (map(string)), so it's passed
+      # through verbatim, no reshaping. Same workflow_dispatch-only gating
+      # as state_rm/state_import.
+      - name: Set oauth_app_imports (import-block recovery, manual escape hatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          OAUTH_APP_IMPORTS_INPUT: ${{ inputs.oauth_app_imports }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$OAUTH_APP_IMPORTS_INPUT" ]; then
+            echo "No oauth_app_imports input provided, skipping import-block recovery."
+            exit 0
+          fi
+
+          echo "TF_VAR_oauth_app_imports=$OAUTH_APP_IMPORTS_INPUT" >> "$GITHUB_ENV"
 
       - name: Terraform Plan
         run: |
