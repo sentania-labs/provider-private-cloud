@@ -1,6 +1,6 @@
 # provider-private-cloud
 
-Control-plane Terraform automation for the VCFA (VMware Cloud Foundation Automation) **region layer**: region creation, external connectivity, provider content library, orgs (including OIDC federation), org networking, and region quotas. This is the top of a three-repo split; `vm-apps-private-cloud` and `all-apps-private-cloud` consume what this repo creates by name via data sources, never remote state, so each repo applies independently and no repo's state layout becomes an API for another.
+Control-plane Terraform automation for the VCFA (VMware Cloud Foundation Automation) **region layer**: region creation, external connectivity, orgs (including OIDC federation), org networking, and region quotas, plus the provider content library as a separate apply stage (`content/`, see "Content is its own stage" below). This is the top of a three-repo split; `vm-apps-private-cloud` and `all-apps-private-cloud` consume what this repo creates by name via data sources, never remote state, so each repo applies independently and no repo's state layout becomes an API for another.
 
 Work in progress. See `docs/proposals/provider-private-cloud-spec.md` in `lab-admin` for the full design rationale; this README covers what actually shipped and what's still open.
 
@@ -8,25 +8,76 @@ Work in progress. See `docs/proposals/provider-private-cloud-spec.md` in `lab-ad
 
 ```
 provider-private-cloud/
-├── backend.tf                 # S3 remote state
+├── backend.tf                 # S3 remote state (key: .../lab/terraform.tfstate)
 ├── versions.tf                # Required providers
 ├── provider.tf                # vcfa + restapi provider config
 ├── variables.tf                # All root variables
 ├── locals.tf                   # local.effective_orgs (enable_orgs phase gate)
 ├── region.tf                   # vCenter/NSX/Supervisor data sources + vcfa_region
 ├── external_connectivity.tf    # IP space (fresh create) + provider gateway
-├── content_library.tf          # Provider content library + items
 ├── orgs.tf                     # module.orgs + OIDC client mint/rotate (restapi provider)
 ├── org_networking.tf           # module.org_networking
 ├── region_quota.tf             # vcfa_org_region_quota, direct resource (not a module)
 ├── roles.tf                    # Custom roles/rights only (scaffolded, see below)
 ├── envs/                       # Environment tfvars (non-secret topology only)
-└── .github/workflows/          # CI: lint (fmt-check + backend-less validate, no secrets) -> plan+apply (push to main only, credentialed)
+├── content/                     # Separate root module + backend: provider content library apply stage, see "Content is its own stage" below
+│   ├── backend.tf                # S3 remote state (key: .../lab/content.tfstate, own lock)
+│   ├── versions.tf                # vcfa provider only
+│   ├── provider.tf                # vcfa provider config
+│   ├── variables.tf                # vcfa_url / vcfa_api_token / insecure / region_name / content_libraries
+│   ├── content_library.tf          # data sources (org System, region by name) + vcfa_content_library(_item) + import block
+│   └── envs/                       # Environment tfvars for this stage
+└── .github/workflows/          # CI: lint (fmt-check + backend-less validate, no secrets) -> plan+apply (platform, push to main only, credentialed) -> content (same gating, needs platform)
 ```
+
+## Content is its own stage
+
+The provider content library used to be a resource in this root (`content_library.tf`, provider-scoped, always built regardless of `enable_orgs`). It is now `content/`, its own root module with its own S3 backend (`.../lab/content.tfstate`), applied as a separate CI job that runs after the platform stage succeeds. Two reasons, both from the same incident (CI run 30784618486):
+
+1. **Content is not platform, and must not gate identity or networking (Scott's ruling).** A content library create call is a long-running, publisher-dependent operation (see below); orgs, OIDC federation, org networking, and region quotas have no reason to wait on it, or to fail because it failed.
+2. **A long-running content operation must not be able to expire the session underneath unrelated resources in the same apply.** In that run, the subscribed library's create call sat on VCFA's own sync task for 60+ minutes. The `vcfa` provider's session token expired mid-wait; the create call then errored with a 401 retrieving task status, and every downstream resource in that single apply graph (OIDC, org networking, region quotas, local admin users) never applied, purely because it shared a graph and a provider session with a slow content operation it had no actual dependency on. Splitting the stage means a content-side timeout or session expiry can no longer take down identity/networking resources it never needed to run alongside.
+
+Each stage has its **own S3 lock** (`use_lockfile = true` on both `backend.tf`s, independent lock ids). If a stage's apply is killed or times out mid-run (the new `timeout-minutes: 30` on both CI jobs), that stage's lock can be left held. Clearing it is a manual, by-design step, not something CI automates:
+
+```bash
+# From the repo root, for the platform stage:
+terraform force-unlock <lock-id>
+
+# From content/, for the content stage:
+cd content && terraform force-unlock <lock-id>
+```
+
+Run this once per stage whose lock is actually stuck; the two stages' locks are independent, clearing one has no effect on the other. `<lock-id>` is printed in the error Terraform gives when it can't acquire a held lock.
+
+### Adopting the live library
+
+Run 30784618486 (before this split existed) created `vcf-lab-content-library` successfully server-side (Scott confirmed in the VCFA portal) but the create call's Terraform-side 401 (see above) meant it never entered state. A naive re-apply would collide with it on name. `content/content_library.tf` has a native `import {}` block adopting it instead of recreating it:
+
+```hcl
+import {
+  to = vcfa_content_library.this["provider_library"]
+  id = "System.vcf-lab-content-library"
+}
+```
+
+The import id format is confirmed against the `vmware/terraform-provider-vcfa` `v1.2.0` docs (`docs/resources/content_library.md`, Import section, matching this repo's `versions.tf` pin of `~> 1.2`): PROVIDER-type libraries import as `"<org name>"."<library name>"` with `.` as the default separator (overridable via the provider's `import_separator` or `VCFA_IMPORT_SEPARATOR`), which resolves to the single string `System.vcf-lab-content-library` once the docs' shell-quoting is read as plain concatenation.
+
+This session could not run `terraform plan` against real credentials or real state, so the import's post-plan cleanliness is **not confirmed by this work**, only by reading the schema and matching `content/envs/lab.tfvars`' config (name, org, storage class, subscription config, no `items`) as closely as possible to the live object. The first CI run on the PR that introduces this (a `workflow_dispatch` plan-only run against real credentials, before anyone applies) must confirm the plan is clean.
+
+**Platform-root state**: removing `vcfa_content_library`/`vcfa_content_library_item` from the platform root's `.tf` files did not go through `terraform state rm` or `state mv`. Reasoning: Terraform only writes a resource into state after a successful create response, and run 30784618486's create call never reached one (it errored with a 401 while retrieving task status, before any successful create response), so the library should never have entered platform state to begin with. This is this session's best understanding from how Terraform state writes work and from the run's own error, **not confirmed by reading the actual platform state file** (no AWS credentials / backend access in this sandboxed session). Before trusting this blind, the first CI run on this PR, or a manual `terraform state list` against the platform backend if Scott wants to check first, should confirm there's genuinely nothing content-library-shaped left in platform state.
 
 ## Usage
 
 ```bash
+terraform init
+terraform plan  -var-file="envs/lab.tfvars"
+terraform apply -var-file="envs/lab.tfvars"
+```
+
+For the content stage, the same commands from `content/`:
+
+```bash
+cd content
 terraform init
 terraform plan  -var-file="envs/lab.tfvars"
 terraform apply -var-file="envs/lab.tfvars"
@@ -42,7 +93,8 @@ Read before the first real apply against the lab:
 2. **S3 bucket encryption-at-rest is unconfirmed.** No AWS credentials are available in this workspace to check. See "State is credential-bearing" below.
 3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. The `/oauth/callback` suffix in particular is an unverified guess pending a first real apply. See "OAuth app redirect/logout URLs" below.
 4. **`enable_orgs = true` in `envs/lab.tfvars` is the phase-2 apply.** Phase 1 (region + external IP space + provider gateway only, no orgs) is already applied on `main`. Merging the PR that flips this flag to `true` builds both orgs, their break-glass local admins, OIDC federation, org networking, and region quotas, on Scott's explicit go. See "Phased apply" below.
-5. **`provider_library` switching to a subscribed library forces a destroy/recreate.** It was applied in phase 1 as an empty local library; `subscription_url` is `ForceNew` on the provider's `vcfa_content_library` resource, so the next apply against `main` replaces it (empty local library torn down, subscribed library created in its place). No content loss, since the phase-1 library was never populated. The publisher endpoint (`vcf-lab-vcenter-mgmt.int.sentania.net:443`) presents a cert signed by the lab's own CA; if VCFA or the provider needs explicit trust configured for that endpoint before it can subscribe, that's a plausible first-apply failure, not pre-solved here.
+5. **`content/`'s `vcfa_content_library.this["provider_library"]` has a native `import {}` block adopting the live `vcf-lab-content-library`.** This library was created server-side by the platform stage's own earlier apply (before the content/platform split), then never recorded in Terraform state, see "Adopting the live library" below. This session could not run a real plan against real state to confirm the import produces a clean diff: the first CI run on the PR that introduces this (a `workflow_dispatch` plan-only run) must confirm it before anyone applies.
+6. **Two independent state locks now exist** (`.../lab/terraform.tfstate` and `.../lab/content.tfstate`), see "Content is its own stage" below. A wedged apply on either stage can leave its own S3 lock held; clearing one has no effect on the other.
 
 ## Registry modules consumed
 
@@ -162,8 +214,8 @@ No true "unlimited" sentinel is documented for `vcfa_org_region_quota`'s `cpu_li
 
 Check these against the repo's actual Settings > Secrets > Actions page:
 
-- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: S3 backend
-- `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account)
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: S3 backend (both stages: platform's `terraform.tfstate` and content's `content.tfstate`)
+- `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account). Used by both the platform stage and the `content` job: content library operations are org System, PROVIDER-scoped, same auth as the platform root.
 - `VCF_LAB_OPS_USER`, `VCF_LAB_OPS_PASSWORD`: exchanged at CI runtime for a short-lived Ops API token, see "Ops API auth" above
 - `VCF_OPS_API_BASE_URL`: base URL of the VCF Operations API. Existence unconfirmed, see "Open decisions" above.
 - `VCFA_FIRST_USER_DEFAULT_PASSWORD`: single shared password for both orgs' break-glass local admin users. The "Build local admin passwords" step turns it into the `map(string)` JSON `TF_VAR_local_admin_passwords` wants (keyed `all_apps`/`vm_apps`) via `jq -nc --arg`, reading the value from an env var rather than interpolating it into a shell command string, so it never lands in a logged command line.
@@ -178,7 +230,7 @@ Merging to `main` triggers `plan-and-apply` with `-auto-approve` against the rea
 
 `var.enable_orgs` (`variables.tf`, gated through `local.effective_orgs` in `locals.tf`) lets Scott apply this repo in two phases instead of all at once:
 
-- **Phase 1** (`enable_orgs = false`): region, external IP space, provider gateway, and content library only. No orgs, no org networking, no region quotas, no OIDC/OAuth client minting. Already applied on `main`.
+- **Phase 1** (`enable_orgs = false`): region, external IP space, and provider gateway only. No orgs, no org networking, no region quotas, no OIDC/OAuth client minting. Already applied on `main`. (Historical: phase 1 also built the content library, back when it was a resource in this root; the content library is now `content/`'s own stage, unaffected by this flag, see "Content is its own stage" above.)
 - **Phase 2** (`enable_orgs = true`, the current committed value in `envs/lab.tfvars`): everything in phase 1, plus `module.orgs`, break-glass local admin users, `module.org_networking`, `vcfa_org_region_quota`, and the OAuth app mint/rotate resources, for every org in `var.orgs`. Merging the `feat/local-admin-break-glass` PR that set this flag to `true` **is** the phase-2 apply, on Scott's explicit go given during that PR's development, not a future separate commit.
 
 `var.orgs` itself is never emptied or hand-edited to move between phases: the full org config stays committed and ready in `envs/lab.tfvars`, and `enable_orgs` alone decides whether it gets built.

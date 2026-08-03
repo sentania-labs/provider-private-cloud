@@ -59,6 +59,7 @@ jobs:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: lint
     runs-on: [self-hosted, terraform]
+    timeout-minutes: 30
 
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -141,4 +142,63 @@ jobs:
       # plan/apply succeeded, failed, or was skipped as plan-only.
       - name: Clean workspace
         if: always()
+        run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete
+
+  # Provider content library, its own apply stage (content/), gated to run
+  # only after the platform stage (plan-and-apply) succeeds: content is not
+  # platform, and must not gate identity/networking. See README's "Content
+  # is its own stage" section. Same trigger gating as plan-and-apply, same
+  # apply-toggle semantics, same unconditional cleanup. Only the vcfa
+  # provider's own credentials plus the AWS backend creds are needed here:
+  # no Ops API token, no local admin passwords, those are platform-only
+  # concerns this stage never touches.
+  content:
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    needs: plan-and-apply
+    runs-on: [self-hosted, terraform]
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: content
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+      # vcfa provider api_token auth (VCF Admin service account, provider
+      # portal). Same secret the platform stage uses: content library
+      # operations are org System, PROVIDER-scoped, same auth as the
+      # platform root.
+      TF_VAR_vcfa_api_token: ${{ secrets.VCF_LAB_PROVIDER_REFRESH_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        run: |
+              terraform plan -input=false -no-color \
+              -var-file="envs/lab.tfvars" \
+              -out=tfplan
+
+      # Only applies on push to main, or on workflow_dispatch with apply=true.
+      # Same semantics as the platform stage's apply step.
+      - name: Terraform Apply
+        if: github.event_name == 'push' || inputs.apply == true
+        run: terraform apply -input=false -auto-approve tfplan
+
+      # Unconditional, same rationale as the platform stage's cleanup step:
+      # tfplan is credential-adjacent (references live storage class/org
+      # ids) and must not survive on this persistent self-hosted runner.
+      - name: Clean workspace
+        if: always()
+        working-directory: .
         run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete

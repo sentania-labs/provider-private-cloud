@@ -38,16 +38,9 @@ oidc_wellknown_endpoint = "https://vcf-lab-idb.int.sentania.net/acs/t/CUSTOMER/.
 # onboarding block.
 external_cidr = "172.18.0.0/16"
 
-content_libraries = {
-  provider_library = {
-    name                = "vcf-lab-content-library"
-    storage_class_names = ["iscsi-default-policy"]
-    items               = []
-    subscription_config = {
-      subscription_url = "https://vcf-lab-vcenter-mgmt.int.sentania.net:443/cls/vcsp/lib/84ca4972-b3b4-4600-9f02-4634054269ad/lib.json"
-    }
-  }
-}
+# The provider content library now lives in its own apply stage
+# (content/envs/lab.tfvars): content is not platform, and must not gate
+# identity/networking. See README's "Content is its own stage" section.
 
 orgs = {
   # PLACEHOLDER org CIDRs/zone below. There are TWO tenant orgs (all-apps,
