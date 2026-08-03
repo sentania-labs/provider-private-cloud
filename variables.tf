@@ -49,14 +49,14 @@ variable "ops_api_base_url" {
 
 /**
  * ops_api_token
- * Short-lived Ops API token, acquired at CI runtime from VCF_LAB_OPS_USER /
- * VCF_LAB_OPS_PASSWORD via a login round-trip the restapi provider cannot do
- * itself (see .github/workflows/configure-private-cloud.yml's acquire step and
- * README's "Ops API auth" section). Sent as "OpsToken <token>", not "Bearer".
+ * Short-lived Bearer token, produced at CI runtime by exchanging the durable
+ * VCF_LAB_API_TOKEN vIDB user API token via the vIDB token exchange flow
+ * (see .github/workflows/configure-private-cloud.yml's exchange step and
+ * README's "Ops API auth" section). Sent as "Bearer <token>".
  */
 variable "ops_api_token" {
   type        = string
-  description = "Ops API token for the VCF Operations fleet-management IAM API, sent as an OpsToken header. Supply via TF_VAR_ops_api_token (acquired at CI runtime, not stored)."
+  description = "Ops API bearer token for the VCF Operations fleet-management IAM API, sent as a Bearer header. Supply via TF_VAR_ops_api_token (produced at CI runtime via vIDB token exchange, not stored)."
   sensitive   = true
 }
 
