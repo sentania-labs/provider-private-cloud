@@ -92,9 +92,12 @@ jobs:
       TF_VAR_vcfa_api_token: ${{ secrets.VCF_LAB_PROVIDER_REFRESH_KEY }}
 
       # VCF Operations IAM API (OIDC client minting/rotation, see orgs.tf).
-      # ops_api_token is NOT a stored secret: it's a short-lived token acquired
-      # at runtime by the step below and exported via GITHUB_ENV.
-      TF_VAR_ops_api_base_url: ${{ secrets.VCF_OPS_API_BASE_URL }}
+      # ops_api_base_url is a known lab hostname, not a credential, so it's a
+      # plain value here rather than a repo secret (see variables.tf's doc
+      # comment for ops_api_base_url). ops_api_token is NOT a stored secret
+      # either: it's a short-lived token acquired at runtime by the step
+      # below and exported via GITHUB_ENV.
+      TF_VAR_ops_api_base_url: "https://vcf-lab-operations.int.sentania.net"
 
       # Single shared password (Scott: one password for both orgs' break-glass
       # admins for now) exposed only as an env var, never interpolated
@@ -115,10 +118,18 @@ jobs:
       # auth" section.
       - name: Acquire Ops API token
         run: |
-          token=$(curl -sf -X POST "${{ secrets.VCF_OPS_API_BASE_URL }}/suite-api/api/auth/token/acquire" \
+          set -euo pipefail
+
+          token=$(curl -sf -X POST "$TF_VAR_ops_api_base_url/suite-api/api/auth/token/acquire" \
             -H "Content-Type: application/json" \
             -d "{\"username\":\"${{ secrets.VCF_LAB_OPS_USER }}\",\"password\":\"${{ secrets.VCF_LAB_OPS_PASSWORD }}\"}" \
             | jq -r '.token')
+
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "Failed to acquire Ops API token (check VCF_LAB_OPS_USER / VCF_LAB_OPS_PASSWORD or endpoint reachability)" >&2
+            exit 1
+          fi
+
           echo "::add-mask::$token"
           echo "TF_VAR_ops_api_token=$token" >> "$GITHUB_ENV"
 

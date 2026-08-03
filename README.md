@@ -216,7 +216,6 @@ No true "unlimited" sentinel is documented for `vcfa_org_region_quota`'s `cpu_li
 2. **SupervisorNamespaceClasses module placement**: not built here (out of scope for this repo per spec 3.9). Open: module lives here, or in the org tenant repos (`vm-apps-private-cloud` / `all-apps-private-cloud`)?
 3. **`hol-scitech` ownership**: does it live in `var.orgs` here, or get created by the hand-off python so the pod maintainer sees the whole flow end to end? Not included in `envs/lab.tfvars` pending this answer.
 4. **OAuth app redirect URL**: guessed, see "OAuth app redirect/logout URLs" above, needs reconciling against `module.orgs[*].oidc_redirect_uri` after a first apply.
-5. **`VCF_OPS_API_BASE_URL` secret**: referenced by the workflow (`TF_VAR_ops_api_base_url`) but not in the list of secrets Scott confirmed as created. UNRESOLVED whether it already exists under this name in the repo's Settings > Secrets: if not, it needs creating before the credentialed job can run.
 
 ## Repo secrets the workflow expects
 
@@ -225,8 +224,9 @@ Check these against the repo's actual Settings > Secrets > Actions page:
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: S3 backend (both stages: platform's `terraform.tfstate` and content's `content.tfstate`)
 - `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account). Used by both the platform stage and the `content` job: content library operations are org System, PROVIDER-scoped, same auth as the platform root.
 - `VCF_LAB_OPS_USER`, `VCF_LAB_OPS_PASSWORD`: exchanged at CI runtime for a short-lived Ops API token, see "Ops API auth" above
-- `VCF_OPS_API_BASE_URL`: base URL of the VCF Operations API. Existence unconfirmed, see "Open decisions" above.
 - `VCFA_FIRST_USER_DEFAULT_PASSWORD`: single shared password for both orgs' break-glass local admin users. The "Build local admin passwords" step turns it into the `map(string)` JSON `TF_VAR_local_admin_passwords` wants (keyed `all_apps`/`vm_apps`) via `jq -nc --arg`, reading the value from an env var rather than interpolating it into a shell command string, so it never lands in a logged command line.
+
+`ops_api_base_url` is no longer a repo secret: it's a known lab hostname (`https://vcf-lab-operations.int.sentania.net`), set as a plain `TF_VAR_ops_api_base_url` workflow env in `plan-and-apply`'s job-level env block.
 
 No other secrets should be referenced anywhere in the workflow. In particular `VCF_LAB_SYSTEM_ADMIN_USERNAME`, `VCF_LAB_SYSTEM_ADMIN_PASSWORD`, `VCF_OPS_API_TOKEN`, `VCF_OPS_SSO_REALM_ID`, `VCF_LAB_EXTERNAL_CIDR`, and `VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS` (referenced by earlier builds of this workflow) are gone: superseded by `vcfa_api_token`, the Ops token-acquire step, the committed `sso_realm_id` / `external_cidr` values, and `VCFA_FIRST_USER_DEFAULT_PASSWORD` respectively. There is exactly one password source now, not two.
 

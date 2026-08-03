@@ -36,14 +36,15 @@ variable "insecure" {
  * Connection to the VCF Operations fleet-management IAM API, used only to mint and
  * rotate per-org OAuth app client secrets (ruling: vcfa_org_oidc's client_secret is
  * not recoverable once set, so it is minted here rather than carried by hand).
- * Both are sensitive and supplied via TF_VAR_*, never defaulted or committed: the
- * base URL is treated as sensitive alongside the token because it identifies the
- * specific Ops instance being administered.
+ * ops_api_base_url is a known lab hostname, not a credential: it's supplied via
+ * TF_VAR_ops_api_base_url as a plain CI workflow env, not a repo secret, and is
+ * never defaulted or committed to envs/lab.tfvars since it's environment-specific.
+ * ops_api_token is the one that's actually sensitive: a live credential, still
+ * supplied via TF_VAR_*, never defaulted or committed.
  */
 variable "ops_api_base_url" {
   type        = string
   description = "Base URL of the VCF Operations API (e.g. https://<ops-fqdn>). Supply via TF_VAR_ops_api_base_url."
-  sensitive   = true
 }
 
 /**
