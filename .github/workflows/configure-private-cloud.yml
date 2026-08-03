@@ -123,10 +123,15 @@ jobs:
           body_file=$(mktemp)
           trap 'rm -f "$body_file"' EXIT
 
+          # VCF_LAB_OPS_USER (vcf@int.sentania.net) is SSO-backed, not a local
+          # account, so authSource must be present or the appliance rejects
+          # the request. Confirmed live via GET /suite-api/api/auth/sources:
+          # the appliance's single auth source is id 841fafcb-445e-4b16-9634-
+          # f09480f1836b, type VIDB, name "VCF SSO".
           status=$(curl -s -o "$body_file" -w '%{http_code}' -X POST \
             "$TF_VAR_ops_api_base_url/suite-api/api/auth/token/acquire" \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"${{ secrets.VCF_LAB_OPS_USER }}\",\"password\":\"${{ secrets.VCF_LAB_OPS_PASSWORD }}\"}") || status="000"
+            -d "{\"username\":\"${{ secrets.VCF_LAB_OPS_USER }}\",\"password\":\"${{ secrets.VCF_LAB_OPS_PASSWORD }}\",\"authSource\":\"VCF SSO\"}") || status="000"
 
           if [ "${status:0:1}" != "2" ]; then
             echo "Ops API token acquire failed with HTTP status: $status" >&2
@@ -135,7 +140,7 @@ jobs:
                 echo "Credentials rejected: check VCF_LAB_OPS_USER / VCF_LAB_OPS_PASSWORD" >&2
                 ;;
               400)
-                echo "Request shape rejected: a non-local account may need authSource set" >&2
+                echo "Request shape rejected: check the authSource value (expected: VCF SSO)" >&2
                 ;;
               *)
                 echo "Unexpected status: check endpoint reachability / connectivity" >&2
