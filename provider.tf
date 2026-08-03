@@ -17,6 +17,10 @@ provider "vcfa" {
 # suite-api as "Bearer <token>": confirmed working in the lab. The old
 # "OpsToken <token>" scheme was specific to the suite-api username/password
 # acquire flow, which is retired since it rejects the SSO-backed CI account.
+#
+# uri/write_returns_object/create_returns_object/headers confirmed valid on
+# Mastercard/restapi v2.0.1 (see versions.tf and README's "restapi provider
+# limitations" section for why this is pinned to the 2.x line, not 3.x).
 provider "restapi" {
   uri                   = var.ops_api_base_url
   write_returns_object  = true

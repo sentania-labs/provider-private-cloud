@@ -130,7 +130,7 @@ S3 bucket encryption-at-rest finding: **could not check.** This environment has 
 
 ## How OIDC client secrets are minted (not carried by hand)
 
-`vcfa_org_oidc`'s `client_secret` is not recoverable from VCFA once set; it lives only in vIDB / the Ops locker. Rather than hand-carrying it, `orgs.tf` uses the `Mastercard/restapi` provider (`~> 3.0.0`) to mint and rotate a per-org OAuth App under the Ops SSO realm (`POST .../ssorealms/{ssoRealmId}/oauth-apps`, then `POST .../oauth-apps/{id}/rotate`), and feeds the response straight into `module.orgs[*].oidc.client_id` / `oidc_client_secret`.
+`vcfa_org_oidc`'s `client_secret` is not recoverable from VCFA once set; it lives only in vIDB / the Ops locker. Rather than hand-carrying it, `orgs.tf` uses the `Mastercard/restapi` provider (`~> 2.0`) to mint and rotate a per-org OAuth App under the Ops SSO realm (`POST .../ssorealms/{ssoRealmId}/oauth-apps`, then `POST .../oauth-apps/{id}/rotate`), and feeds the response straight into `module.orgs[*].oidc.client_id` / `oidc_client_secret`.
 
 **Rotation is on-demand, never on every apply.** Each org's `oidc.rotation_id` is a keeper: unchanged across applies, the rotate resource's `data` doesn't change, so Terraform issues no API call and the plan is clean and empty for it. Bumping `rotation_id` fires exactly one rotate call.
 
@@ -140,8 +140,27 @@ The `Mastercard/restapi` provider models everything as a `restapi_object` (a RES
 
 - The rotate resource uses `update_method`/`update_path` overrides so a `rotation_id` change fires a POST to the rotate path instead of a PUT to a real update endpoint that doesn't exist, and `ignore_all_server_changes = true` since there's nothing meaningful to read back and diff against.
 - On first apply, Terraform's CREATE call also targets the rotate path (deliberately): the org's OAuth app is rotated immediately after being minted, so the rotate resource's response is the single source of truth for "the org's current secret" in every case, not just after an explicit rotation.
-- There is no server-side DELETE for a rotation action. Removing the rotate resource from config, or removing an org's `oidc` block after it's been applied, would issue a DELETE the API almost certainly doesn't support. Don't do that: see the comment block at the top of the rotate resource in `orgs.tf`.
+- A `rotation_id` change forces a full destroy+create replace of the rotate resource (a `lifecycle.replace_triggered_by` keyed to a `terraform_data` mirror of `rotation_id`), not an in-place update: on `Mastercard/restapi` v2.0.1 the secret has to come from `create_response`, which only CREATE populates, so every rotation needs to go through CREATE. See the long comment on `oauth_app_rotate` in `orgs.tf`.
+- There is no server-side DELETE for a rotation action. `destroy_method`/`destroy_path` are overridden to a harmless GET against the OAuth app's real, already-verified-working object endpoint, so the destroy half of that routine replace cycle can't fail or delete anything, rather than depending on an untested assumption about how the API responds to a DELETE against a path that was never a real object. Removing the rotate resource from config entirely, or removing an org's `oidc` block after it's been applied, is still unsupported: don't do that, see the comment block at the top of the rotate resource in `orgs.tf`.
 - The well-known-URL discovery lookup is no longer a `restapi_object` data source: see "SSO realm and OIDC discovery" below for why it's now a plain committed value.
+
+### restapi provider is pinned to 2.x, not 3.x
+
+`Mastercard/restapi` is deliberately pinned to `~> 2.0` (`versions.tf`) and should not be bumped to a 3.x release until a fixed release addresses the empty-JSON-on-refresh bug: v3.0.0's plugin-framework rewrite fails `terraform plan`'s refresh step with `Invalid JSON String Value` on the `data` field of both `restapi_object` resources in this file, tracked upstream as Mastercard/terraform-provider-restapi#350 and #367 (the #350 reporter confirmed this persists in the v3.0.0 release itself, and there is no fixed release as of this writing). v2.0.1 (the newest 2.x release) doesn't have this bug: its `data` field is a plain string, not a JSON-typed one that validates on refresh.
+
+The two orphaned OAuth apps left behind in vIDB under their old names (`vcf-lab-all-apps-oidc`, `vcf-lab-vm-apps-oidc`) can be deleted from the vIDB UI at leisure; they are not referenced by Terraform state or config regardless of what version of the provider is used, so there's no urgency and no automation task for it.
+
+### Escape hatch: `terraform state rm` via workflow_dispatch
+
+`configure-private-cloud.yml`'s `workflow_dispatch` trigger has an optional `state_rm` input: a space- or comma-separated list of Terraform state addresses to `terraform state rm` before planning. This exists for CI-native state surgery, no SSH to the runner, no local state file edits, when a provider migration (or similar) leaves state entries the new provider version can't safely refresh. It only ever runs on an explicit, manually-triggered `workflow_dispatch` run: it is never wired into the `push` trigger.
+
+**Immediate post-merge step for this PR**: after this PR merges and before the next `plan-and-apply` run, trigger `workflow_dispatch` with `state_rm` set to:
+
+```
+restapi_object.oauth_app["all_apps"], restapi_object.oauth_app["vm_apps"]
+```
+
+so the v2 provider never tries to refresh state entries written by v3 (which is what would otherwise immediately re-trigger the same class of bug, or a different v2/v3 schema mismatch, on the very next apply). As of this writing, those are the only two `restapi_object` entries in state: the `oauth_app_rotate` resources and the org OIDC federation configs were never actually created, since the failing run never got past `terraform plan`, so there is nothing else to remove.
 
 ## Break-glass local admins and tenant CI credentials (design note, not implemented here)
 

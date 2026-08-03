@@ -12,6 +12,10 @@ on:
         description: "Apply after plan (unchecked = plan-only dry run against real credentials)"
         type: boolean
         default: false
+      state_rm:
+        description: "Optional: space or comma separated terraform state addresses to `terraform state rm` before planning (e.g. state surgery for provider migrations)"
+        type: string
+        default: ""
 
 jobs:
   # Runs on every push and PR (fork-gated). No secrets: fmt-check and a
@@ -183,6 +187,39 @@ jobs:
       # A plain init still creates the state object on first run.
       - name: Terraform Init
         run: terraform init -input=false
+
+      # Optional manual escape hatch: CI-native state surgery (no SSH, no
+      # local state file edits) for cases like a provider migration leaving
+      # behind state entries the new provider version can't safely refresh.
+      # Only ever fires on an explicit workflow_dispatch run: push events
+      # never populate `inputs.*`, so the gating lives inside the step body
+      # (checking the input value itself) rather than only in the step-level
+      # `if`, matching this workflow's existing apply-toggle gating style.
+      - name: Terraform state rm (manual escape hatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          STATE_RM_INPUT: ${{ inputs.state_rm }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$STATE_RM_INPUT" ]; then
+            echo "No state_rm input provided, skipping state surgery."
+            exit 0
+          fi
+
+          # Split on commas first, then on whitespace within each piece, so
+          # both "a, b" and "a b" work. Addresses like
+          # restapi_object.oauth_app["all_apps"] contain brackets and quotes
+          # but never spaces, so word-splitting on whitespace only is safe
+          # here. Each address is passed to `terraform state rm` as its own
+          # argument (quoted), never string-interpolated together.
+          echo "$STATE_RM_INPUT" | tr ',' '\n' | while IFS= read -r line; do
+            for addr in $line; do
+              [ -z "$addr" ] && continue
+              echo "Removing from state: $addr"
+              terraform state rm -- "$addr"
+            done
+          done
 
       - name: Terraform Plan
         run: |

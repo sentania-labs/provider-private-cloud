@@ -56,6 +56,16 @@ locals {
     for k, o in local.oidc_orgs :
     k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}/rotate"
   }
+
+  # The oauth_app_rotate resource below has no real GET-able counterpart
+  # (the rotate path is a bare POST action), so it needs an explicit
+  # read_path override pointing back at the underlying OAuth app object
+  # instead. See the long comment on oauth_app_rotate for why this is
+  # required on Mastercard/restapi v2.0.1, not optional polish.
+  oauth_app_read_path = {
+    for k, o in local.oidc_orgs :
+    k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}"
+  }
 }
 
 # Rotation is on-demand, never on every apply (ruling 4). This resource
@@ -67,13 +77,10 @@ locals {
 #   - `data` holds only `rotation_id`. As long as var.orgs[*].oidc.rotation_id
 #     is unchanged, `data` doesn't change, so Terraform issues no API call
 #     and the plan is clean and empty for this resource.
-#   - `update_method`/`update_path` are overridden to POST the rotate path,
-#     so a *change* to `rotation_id` fires exactly one POST to rotate,
-#     never a PUT to a real update endpoint that doesn't exist.
-#   - `ignore_all_server_changes = true` because there is nothing to read
-#     back and compare: this is an action trigger, not a stateful object.
-#     Without it, the provider's normal drift-correction behavior has
-#     nothing meaningful to reconcile against.
+#   - A `rotation_id` change forces a full replace (destroy the terraform
+#     object, then re-create it), never an in-place update. See the
+#     replace_triggered_by comment below for why this changed from the
+#     original update-in-place shape.
 #
 # On first apply (object doesn't exist yet), Terraform calls CREATE, which
 # also targets the rotate path (create_method/path below): the org's OAuth
@@ -83,27 +90,90 @@ locals {
 # including the very first apply, rather than needing to special-case
 # "first secret came from create, every secret after came from rotate."
 #
-# What this can't express cleanly: there is no server-side DELETE for a
-# rotation action. Removing this resource from config (or removing an
-# org's oidc block after it's been applied) would issue a DELETE against
-# the rotate path, which the API almost certainly doesn't support. Don't
-# do that: to stop managing an org's OIDC federation, set is_enabled=false
-# or remove the org from var.orgs entirely (which also destroys
-# module.orgs' vcfa_org_oidc), not just its oidc block.
+# read_path / destroy_path / force-replace (all v2.0.1-specific, confirmed
+# against Mastercard/terraform-provider-restapi v2.0.1 source --
+# restapi/resource_api_object.go and restapi/api_object.go): unlike the
+# plugin-framework v3 line, this SDKv2-based generation always calls the
+# resource's Read on every `terraform plan`/`apply` refresh, regardless of
+# ignore_all_server_changes (that flag only suppresses drift-correction on
+# `data`, not the GET call itself). Two consequences follow from there
+# being no real GET-able endpoint for a bare POST action, and both needed
+# a fix, not just a comment:
+#
+#   1. Left at its default read_path (path/{id}, i.e. the rotate path with
+#      this resource's synthetic object_id appended), that GET 404s every
+#      time. A 404 makes the provider clear the object's id, and Terraform
+#      then treats the resource as deleted, forcing a recreate (and
+#      therefore a real rotate call) on every single apply -- exactly the
+#      "never on every apply" behavior this resource exists to prevent.
+#      Fixed by pointing read_path at the underlying OAuth app's real
+#      object endpoint instead (confirmed GET-able, same id used by
+#      oauth_app's own read_path default): that keeps the id valid across
+#      refreshes, and is harmless since ignore_all_server_changes still
+#      prevents that read from ever rewriting `data`.
+#   2. That same fix has a side effect: because the read now genuinely
+#      hits the OAuth app object, not the rotate action, its response does
+#      not contain clientSecret. api_object.go's readObject() overwrites
+#      api_response on every call regardless of what it read, so relying
+#      on api_response for the secret (the original design) means the
+#      very next plan-only refresh after any rotation clobbers it, and
+#      module.orgs' jsondecode(...)["clientSecret"] reference below would
+#      then fail on a missing key. create_response doesn't have this
+#      problem: confirmed in resource_api_object.go, it's set exactly once
+#      per CREATE call and is never touched by Read or Update. So
+#      oidc_client_secret (module.orgs, below) reads create_response, not
+#      api_response, and this resource is forced to go through CREATE on
+#      every rotation (never UPDATE) via the replace_triggered_by lifecycle
+#      block, so create_response is always the latest rotation's response.
+#
+# destroy_method/destroy_path are overridden to a harmless GET against the
+# same real, known-working OAuth app endpoint read_path already uses,
+# instead of the SDK's default DELETE to a garbage path (path/{id}, same
+# broken shape read_path had). There is still no server-side DELETE for a
+# rotation action -- that hasn't changed, and removing this resource from
+# config (or an org's oidc block) is still unsupported, see below -- but
+# the replace_triggered_by lifecycle now makes an internal destroy-then-
+# create cycle a normal, routine part of every deliberate rotation, not
+# just a hypothetical from removing config. Leaving the default DELETE in
+# place for that routine cycle would depend on an untested assumption
+# (that an unverified path 404s cleanly rather than 405s or worse) on
+# every single rotation; a GET against a URL already confirmed to succeed
+# removes that risk entirely, since it can't fail or delete anything.
 resource "restapi_object" "oauth_app_rotate" {
   for_each = local.oauth_app_rotate_path
 
-  path          = each.value
-  object_id     = "${each.key}-rotation"
-  create_method = "POST"
-  update_method = "POST"
-  update_path   = each.value
+  path           = each.value
+  object_id      = "${each.key}-rotation"
+  create_method  = "POST"
+  update_method  = "POST"
+  update_path    = each.value
+  read_path      = local.oauth_app_read_path[each.key]
+  destroy_method = "GET"
+  destroy_path   = local.oauth_app_read_path[each.key]
 
   ignore_all_server_changes = true
 
   data = jsonencode({
     rotation_id = local.oidc_orgs[each.key].oidc.rotation_id
   })
+
+  # Forces a destroy+create replace whenever rotation_id changes, instead
+  # of the SDK's default in-place update. terraform_data is Terraform's own
+  # built-in no-op resource (Terraform >= 1.4, no provider declaration
+  # needed): its `input` mirrors rotation_id, so it only shows a diff when
+  # rotation_id actually changes, and replace_triggered_by only fires a
+  # replace when its referenced resource shows a diff. See the long
+  # comment above the resource for why UPDATE (in-place) was the wrong
+  # shape once create_response became the secret's source of truth.
+  lifecycle {
+    replace_triggered_by = [terraform_data.oauth_app_rotation_trigger[each.key]]
+  }
+}
+
+resource "terraform_data" "oauth_app_rotation_trigger" {
+  for_each = local.oidc_orgs
+
+  input = each.value.oidc.rotation_id
 }
 
 module "orgs" {
@@ -138,14 +208,21 @@ module "orgs" {
     prefer_id_token        = each.value.oidc.prefer_id_token
     groups                 = each.value.oidc.groups
   }
-  # api_response is documented as "the raw body of the HTTP response from
-  # the last read of the object" -- whether the provider populates it from
-  # the write call itself (create/update) or only from a subsequent read is
-  # not confirmed against a live Ops instance. If it turns out stale/empty
-  # here, api_data (the fmt-stringified map) or create_response are the
-  # fallbacks to try; flagged in README's restapi-provider-limitations
-  # section as something to verify before a first real apply.
-  oidc_client_secret = each.value.oidc == null ? null : jsondecode(restapi_object.oauth_app_rotate[each.key].api_response)["clientSecret"]
+  # create_response, not api_response: see the long comment on
+  # oauth_app_rotate above. create_response is documented (Mastercard/
+  # restapi v2.0.1 docs) as "the raw body of the HTTP response returned
+  # when creating the object," and confirmed in v2.0.1 source
+  # (resource_api_object.go's resourceRestAPICreate) to be set exactly
+  # once per CREATE call and never touched by a subsequent Read or Update.
+  # api_response, by contrast, gets overwritten by every refresh-triggered
+  # Read -- including reads against read_path, which points at the
+  # underlying OAuth app object and never returns clientSecret -- so it
+  # would go stale (and crash this jsondecode on the missing key) the
+  # first time `terraform plan` runs after any apply that touched this
+  # resource. create_response doesn't have that problem, and stays correct
+  # because oauth_app_rotate's replace_triggered_by lifecycle block forces
+  # every rotation through CREATE, never UPDATE.
+  oidc_client_secret = each.value.oidc == null ? null : jsondecode(restapi_object.oauth_app_rotate[each.key].create_response)["clientSecret"]
 }
 
 # Break-glass local admin user, created at root rather than inside
