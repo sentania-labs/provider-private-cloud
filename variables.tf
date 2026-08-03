@@ -207,9 +207,16 @@ variable "orgs" {
     display_name = string
     description  = optional(string, "")
     is_enabled   = optional(bool, true)
+    # Break-glass local (non-federated) admin user for the org. role_name is
+    # a role NAME (e.g. "Organization Administrator"), not a raw role_ids
+    # reference: the role's id only exists once the org itself exists, so it
+    # is resolved at apply time via data.vcfa_role in orgs.tf, root-level
+    # (not through module.orgs, which only accepts raw role_ids and would
+    # create a circular dependency if fed this org's own id). Password comes
+    # from var.local_admin_passwords, keyed the same as this map.
     local_admin = optional(object({
-      username = string
-      role_ids = set(string)
+      username  = string
+      role_name = string
     }))
     oidc = optional(object({
       ui_button_label        = optional(string, "VCF SSO")
