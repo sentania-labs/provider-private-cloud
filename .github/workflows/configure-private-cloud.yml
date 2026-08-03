@@ -270,7 +270,7 @@ jobs:
               fi
 
               echo "Importing into state: $addr <- $id"
-              terraform import -- "$addr" "$id"
+              terraform import -var-file="envs/lab.tfvars" -- "$addr" "$id"
             done
           done
 
