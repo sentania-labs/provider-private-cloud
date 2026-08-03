@@ -17,8 +17,19 @@ jobs:
   # Runs on every push and PR (fork-gated). No secrets: fmt-check and a
   # backend-less validate only, so a PR branch can never read or exfiltrate
   # production credentials just by being opened. Credentialed planning is
-  # confined to the `plan-and-apply` job below, which never runs on
-  # pull_request events.
+  # confined to the `plan-and-apply` and `content` jobs below, neither of
+  # which ever runs on pull_request events.
+  #
+  # `content/` is its own root module (own backend, own provider block), not
+  # a child module of this root, so the platform-root fmt/init/validate
+  # steps below never touch it on their own: `terraform fmt -check` without
+  # `-recursive` only checks the current directory, and `terraform init` /
+  # `terraform validate` only ever operate on the working directory they're
+  # run from. Without the `-recursive` flag and the separate content/ init +
+  # validate steps below, a malformed or provider-incompatible content/
+  # config would pass this job and only be caught by the credentialed
+  # `content` job, after `plan-and-apply` has already applied on a push to
+  # main.
   lint:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
     runs-on: [self-hosted, terraform]
@@ -32,12 +43,20 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Terraform Format Check
-        run: terraform fmt -check
+        run: terraform fmt -check -recursive
 
       - name: Terraform Init (no backend)
         run: terraform init -backend=false -input=false
 
       - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Init (content/, no backend)
+        working-directory: content
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Validate (content/)
+        working-directory: content
         run: terraform validate
 
   # Runs on push to main (always applies) and on workflow_dispatch (plan-only
