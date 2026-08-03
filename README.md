@@ -42,6 +42,7 @@ Read before the first real apply against the lab:
 2. **S3 bucket encryption-at-rest is unconfirmed.** No AWS credentials are available in this workspace to check. See "State is credential-bearing" below.
 3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. The `/oauth/callback` suffix in particular is an unverified guess pending a first real apply. See "OAuth app redirect/logout URLs" below.
 4. **`enable_orgs = true` in `envs/lab.tfvars` is the phase-2 apply.** Phase 1 (region + external IP space + provider gateway only, no orgs) is already applied on `main`. Merging the PR that flips this flag to `true` builds both orgs, their break-glass local admins, OIDC federation, org networking, and region quotas, on Scott's explicit go. See "Phased apply" below.
+5. **`provider_library` switching to a subscribed library forces a destroy/recreate.** It was applied in phase 1 as an empty local library; `subscription_url` is `ForceNew` on the provider's `vcfa_content_library` resource, so the next apply against `main` replaces it (empty local library torn down, subscribed library created in its place). No content loss, since the phase-1 library was never populated. The publisher endpoint (`vcf-lab-vcenter-mgmt.int.sentania.net:443`) presents a cert signed by the lab's own CA; if VCFA or the provider needs explicit trust configured for that endpoint before it can subscribe, that's a plausible first-apply failure, not pre-solved here.
 
 ## Registry modules consumed
 

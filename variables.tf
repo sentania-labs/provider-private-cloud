@@ -135,8 +135,12 @@ variable "content_libraries" {
       name       = string
       file_paths = list(string)
     })), [])
+    subscription_config = optional(object({
+      subscription_url = string
+      password         = optional(string)
+    }))
   }))
-  description = "Provider content libraries and their items. storage_class_names are resolved to storage class ids in the region (vcfa_content_library requires storage_class_ids, not a region reference)."
+  description = "Provider content libraries and their items. storage_class_names are resolved to storage class ids in the region (vcfa_content_library requires storage_class_ids, not a region reference). subscription_config turns a library into a subscribed library pulling content from a publisher; subscription_url forces replacement if changed after creation (provider ForceNew), and items should stay empty for a subscribed library since content comes from the publisher."
   default     = {}
 }
 
