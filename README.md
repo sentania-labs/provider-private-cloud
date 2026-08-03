@@ -162,15 +162,15 @@ The two orphaned OAuth apps left behind in vIDB under their old names (`vcf-lab-
 
 **Import id format for `restapi_object` (Mastercard/restapi v2.0.1)**: confirmed from the provider's own `resourceRestAPIImport` (`restapi/resource_api_object.go`) and its documented example (`examples/resources/restapi_object/import.sh`, `terraform import restapi_object.object /api/objects/123`): the import id is the object's **full API path including the object id** (`/<full path from server root>/<object id>`), not the bare id. The importer derives `path` from everything before the last `/` and the object id from what follows it, so for `oauth_app`'s resource shape (`path = ".../ssorealms/${var.sso_realm_id}/oauth-apps"`, `id_attribute = "id"`), the import id per app is `<path>/<object id>`. This is a real, working import path on v2.0.1, not a v2/v3 quirk to route around: no `import` block fallback is needed here.
 
-**Pending recovery step for this repo, right now**: a stale run's `state_rm` removed both live OAuth apps from state after a newer run had already created them (object ids confirmed live and referenced by both orgs' working `vcfa_org_oidc` configs). Before the next `plan-and-apply` run, trigger `workflow_dispatch` with `state_import` set to (realm id `83369e94-bcad-4674-ba0d-e4b8b70730ee`):
+**Pending recovery step for this repo, right now**: a stale run's `state_rm` removed both live OAuth apps from state after a newer run had already created them (object ids confirmed live and referenced by both orgs' working `vcfa_org_oidc` configs). Do this before touching `state_rm` again or running a plain `plan-and-apply`: with the two apps absent from state, the very next apply would try to CREATE them again and fail with the same 400 (or worse, if the duplicate-name check ever passed, would mint new client ids the live OIDC configs don't have).
 
+**Do not use `state_import` for this.** `orgs.tf` references `restapi_object.oauth_app[each.key]` from two other places (`oauth_app_rotate_path`'s local, and `module.orgs`' `client_id` input), and with the instance missing from state those references fail at eval time with an "Invalid index" error before a `terraform import` CLI call even gets to commit. Use the `oauth_app_imports` import-block recovery path below instead, with these values (realm id `83369e94-bcad-4674-ba0d-e4b8b70730ee`):
+
+```json
+{"all_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/f42c4cd4-bb2a-48f4-a711-677e73c8cd72","vm_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/5c0d6833-b21a-462f-96bb-c3484c8bad8b"}
 ```
-restapi_object.oauth_app["all_apps"]=/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/f42c4cd4-bb2a-48f4-a711-677e73c8cd72, restapi_object.oauth_app["vm_apps"]=/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/5c0d6833-b21a-462f-96bb-c3484c8bad8b
-```
 
-Do this before touching `state_rm` again or running a plain `plan-and-apply`: with the two apps absent from state, the very next apply would try to CREATE them again and fail with the same 400 (or worse, if the duplicate-name check ever passed, would mint new client ids the live OIDC configs don't have). After import, a plan should show no changes for these two `restapi_object.oauth_app` resources (their live `data` already matches config) beyond whatever drift normal refresh surfaces.
-
-**CLI `state_import` is confirmed broken for `restapi_object.oauth_app` when the entry is missing from state.** `orgs.tf` references `restapi_object.oauth_app[each.key]` from two other places (`oauth_app_rotate_path`'s local, and `module.orgs`' `client_id` input), and with the instance missing from state those references fail at eval time with an "Invalid index" error before a `terraform import` CLI call even gets to commit. For this specific resource, use the `oauth_app_imports` import-block recovery path below instead. `state_import` remains the right tool for any other resource nothing else in this config indexes into.
+After import, a plan should show no changes for these two `restapi_object.oauth_app` resources (their live `data` already matches config) beyond whatever drift normal refresh surfaces. `state_import` remains the right tool for any other resource nothing else in this config indexes into.
 
 ### Escape hatch: `oauth_app_imports` import block (recovering `restapi_object.oauth_app` specifically)
 
@@ -184,7 +184,7 @@ Do this before touching `state_rm` again or running a plain `plan-and-apply`: wi
 
 If a key is already present in state (the first CLI-import attempt against `all_apps` may or may not have persisted, this is unknown), Terraform's import will error that the resource is already managed. In that case, drop that key from the `oauth_app_imports` map and re-run with only the remaining key(s).
 
-Recovery value reference, same two org keys and object ids as the pending `state_import` recovery step above, formatted for direct use as the `oauth_app_imports` input value:
+Recovery value reference, same two org keys and object ids as the pending recovery step above, formatted for direct use as the `oauth_app_imports` input value:
 
 ```json
 {"all_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/f42c4cd4-bb2a-48f4-a711-677e73c8cd72","vm_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/5c0d6833-b21a-462f-96bb-c3484c8bad8b"}
@@ -201,6 +201,8 @@ The intended pattern for the tenant repos (`vm-apps-private-cloud`, `all-apps-pr
 3. The minted token becomes the tenant repo's own CI secret (e.g. `TF_VAR_vcfa_api_token` in that repo's workflow), not anything stored or minted in this repo.
 
 Minting itself belongs in the tenant repos or a small bootstrap script/workflow that lives alongside them, not here.
+
+**Temporarily disabled (both orgs), as of 2026-08-03**: `local_admin` is set to `null` for `all_apps` and `vm_apps` in `envs/lab.tfvars`, pending a CI service-account rights fix. `vcfa_org_local_user` creation returns `ACCESS_TO_RESOURCE_IS_FORBIDDEN` for the CI service account (a rights problem, tracked separately, not a bug in `orgs.tf`). The `data.vcfa_role` lookup and `vcfa_org_local_user` resource, the `local_admin` variable shape, and the workflow's password-plumbing steps (`Build local admin passwords`, `VCFA_FIRST_USER_DEFAULT_PASSWORD`, `TF_VAR_local_admin_passwords`) are all left in place, unused while `local_admin` is null. Re-enable by restoring the `local_admin` block in `envs/lab.tfvars` for both orgs once the account's VCFA role covers user management.
 
 ## External CIDR
 

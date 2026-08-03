@@ -64,10 +64,12 @@ orgs = {
     # browser redirect and can't mint a vcfa_api_token non-interactively
     # from CI, so a local (non-federated) admin bootstraps tenant-repo
     # credentials headlessly. See README's tenant token minting section.
-    local_admin = {
-      username  = "admin"
-      role_name = "Organization Administrator"
-    }
+    #
+    # Disabled 2026-08-03 pending a rights fix: vcfa_org_local_user creation
+    # returns ACCESS_TO_RESOURCE_IS_FORBIDDEN for the CI service account.
+    # Re-enable by restoring this block once the account's VCFA role covers
+    # user management.
+    local_admin = null
     oidc = {
       groups = [
         { name = "labadmins@int.sentania.net", role = "Organization Administrator" },
@@ -97,10 +99,12 @@ orgs = {
     display_name = "VCF Lab VM Apps"
     is_enabled   = true
     # Break-glass local admin, same rationale as all_apps above.
-    local_admin = {
-      username  = "admin"
-      role_name = "Organization Administrator"
-    }
+    #
+    # Disabled 2026-08-03 pending a rights fix: vcfa_org_local_user creation
+    # returns ACCESS_TO_RESOURCE_IS_FORBIDDEN for the CI service account.
+    # Re-enable by restoring this block once the account's VCFA role covers
+    # user management.
+    local_admin = null
     oidc = {
       groups = [
         { name = "labadmins@int.sentania.net", role = "Organization Administrator" },
