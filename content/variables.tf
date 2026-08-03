@@ -33,6 +33,15 @@ variable "region_name" {
 # Provider content library (spec 3.3)
 ########################################
 
+variable "adopt_content_library" {
+  type        = bool
+  description = "Whether to import the existing live content library instead of creating it fresh. Answered per-run: the content CI job's 'Probe for existing content library' step queries VCFA and supplies this via TF_VAR_adopt_content_library, true if the library already exists server-side, false if it doesn't. A local/manual run must supply this explicitly (TF_VAR_adopt_content_library=true or false) after checking the VCFA portal for whether the library already exists; there is no default that assumes an answer."
+  # default = false, not omitted: a bare `terraform validate` or a local run
+  # with nothing supplied should default to the no-accidental-import
+  # posture (create), never to importing an object that may not exist.
+  default = false
+}
+
 variable "content_libraries" {
   type = map(object({
     name                = string

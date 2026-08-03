@@ -102,7 +102,17 @@ resource "vcfa_content_library_item" "this" {
 # default separator (VCFA_IMPORT_SEPARATOR / provider import_separator to
 # change it), which is a single string once the shell's adjacent-quote
 # concatenation is resolved: "System.vcf-lab-content-library" below.
+#
+# Gated by var.adopt_content_library, not unconditional: an unconditional
+# import block fails any future fresh rebuild of this stage (importing an
+# object that doesn't exist yet errors the plan). The content CI job's
+# "Probe for existing content library" step (see
+# .github/workflows/configure-private-cloud.yml) answers this per run by
+# querying VCFA for the library by name and supplying
+# TF_VAR_adopt_content_library, so nobody hand-flips this in committed
+# config. See README's "Adopting the live library" section.
 import {
-  to = vcfa_content_library.this["provider_library"]
-  id = "System.vcf-lab-content-library"
+  for_each = var.adopt_content_library ? { adopt = 1 } : {}
+  to       = vcfa_content_library.this["provider_library"]
+  id       = "System.vcf-lab-content-library"
 }

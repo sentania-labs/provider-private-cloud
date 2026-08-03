@@ -180,6 +180,67 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      # Answers var.adopt_content_library per run: nobody hand-flips this
+      # in committed config (see content/variables.tf). Queries VCFA for a
+      # content library named "vcf-lab-content-library" under org System
+      # using the same TF_VAR_vcfa_api_token the job already holds (job env
+      # block above), and writes the result to TF_VAR_adopt_content_library
+      # via GITHUB_ENV, same pattern as "Acquire Ops API token" in the
+      # platform job.
+      #
+      # Endpoint and Accept-header version confirmed against the vcfa
+      # provider's own SDK (github.com/vmware/go-vcloud-director,
+      # govcd/tm_content_library.go GetContentLibraryByName, which issues
+      # GET {vcf/contentLibraries/} with filter=name==<name>;
+      # govcd/openapi_endpoints.go maps that endpoint to minimum API version
+      # 40.0; govcd/openapi.go builds the Accept header as
+      # "application/json;version=<apiVersion>"). The api_token var is a
+      # refresh token, not a bearer token: govcd/api_token.go exchanges it
+      # via POST {rootHref}/oauth/provider/token (org System) with
+      # grant_type=refresh_token before it can be used as a Bearer token,
+      # mirrored below.
+      #
+      # A curl failure (auth error, non-2xx, network error) fails this step
+      # under `set -e` with `curl -sf`, rather than silently defaulting
+      # either way: "API call failed" must abort the job, not be treated as
+      # "library doesn't exist". Only a clean 200 with an empty/non-matching
+      # result set is treated as a legitimate "does not exist yet".
+      - name: Probe for existing content library
+        run: |
+          set -euo pipefail
+
+          vcfa_url=$(grep '^vcfa_url' envs/lab.tfvars | cut -d '"' -f2)
+
+          access_token=$(curl -sf -X POST "$vcfa_url/oauth/provider/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=refresh_token" \
+            --data-urlencode "refresh_token=$TF_VAR_vcfa_api_token" \
+            | jq -r '.access_token')
+          echo "::add-mask::$access_token"
+
+          if [ -z "$access_token" ] || [ "$access_token" = "null" ]; then
+            echo "Failed to acquire a VCFA bearer token for the content library probe" >&2
+            exit 1
+          fi
+
+          response=$(curl -sf -G "$vcfa_url/cloudapi/vcf/contentLibraries/" \
+            -H "Authorization: Bearer $access_token" \
+            -H "Accept: application/json;version=40.0" \
+            --data-urlencode "filter=name==vcf-lab-content-library")
+
+          if ! echo "$response" | jq -e 'has("values")' >/dev/null; then
+            echo "Unexpected response from the content library list endpoint (no 'values' field)" >&2
+            exit 1
+          fi
+
+          match_count=$(echo "$response" | jq '[.values[] | select(.name == "vcf-lab-content-library")] | length')
+
+          if [ "$match_count" -gt 0 ]; then
+            echo "TF_VAR_adopt_content_library=true" >> "$GITHUB_ENV"
+          else
+            echo "TF_VAR_adopt_content_library=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Terraform Init
         run: terraform init -input=false
 
