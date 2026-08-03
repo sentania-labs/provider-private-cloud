@@ -73,8 +73,24 @@ resource "restapi_object" "oauth_app" {
   # into the org's OIDC config (oidc_client_secret, below): that cascade is
   # intentional given how the secret is wired downstream, not a bug to work
   # around.
+  #
+  # create_method, id_attribute, ignore_all_server_changes, and debug are
+  # provider-local attributes: the restapi provider tracks them in state to
+  # remember how it should manage the object, but none of them describe
+  # anything the API server holds, so none of them have any API-relevant
+  # effect. An import (see the state_import escape hatch above) leaves them
+  # unset in the imported state, which then shows up as a plan diff against
+  # this config on the next run even though nothing about the object
+  # changed. Because this resource has no working PUT (see above), letting
+  # Terraform reconcile that diff means an in-place update attempt that
+  # 500s. ignore_changes on these four, same as on data, keeps config
+  # authoritative for new creates while leaving already-imported state
+  # alone. Confirmed against run 30840012739's residual diff:
+  # create_method, id_attribute, ignore_all_server_changes appearing as
+  # "+ create" and debug as "-> null" were the only remaining changes once
+  # data was already ignored.
   lifecycle {
-    ignore_changes = [data]
+    ignore_changes = [data, create_method, id_attribute, ignore_all_server_changes, debug]
   }
 }
 
