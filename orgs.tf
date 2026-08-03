@@ -51,6 +51,13 @@ resource "restapi_object" "oauth_app" {
   # so .id resolves to the value the API's paths expect. Confirmed live:
   # GET/rotate by clientId 404s ("No such id"), GET/rotate by id works.
   id_attribute = "id"
+  # Explicit false, not left to default. debug is deliberately NOT in
+  # ignore_changes below: it enables the provider's own request/response
+  # logging, which can write credential-bearing OAuth payloads to CI logs,
+  # so config (not whatever an import happened to leave in state) must stay
+  # authoritative for it. See the ignore_changes comment for what that
+  # means for already-imported state.
+  debug = false
 
   data = jsonencode({
     clientName   = "VCFA - ${each.value.name}"
@@ -74,23 +81,35 @@ resource "restapi_object" "oauth_app" {
   # intentional given how the secret is wired downstream, not a bug to work
   # around.
   #
-  # create_method, id_attribute, ignore_all_server_changes, and debug are
+  # create_method, id_attribute, and ignore_all_server_changes are
   # provider-local attributes: the restapi provider tracks them in state to
   # remember how it should manage the object, but none of them describe
-  # anything the API server holds, so none of them have any API-relevant
-  # effect. An import (see the state_import escape hatch above) leaves them
-  # unset in the imported state, which then shows up as a plan diff against
-  # this config on the next run even though nothing about the object
-  # changed. Because this resource has no working PUT (see above), letting
-  # Terraform reconcile that diff means an in-place update attempt that
-  # 500s. ignore_changes on these four, same as on data, keeps config
-  # authoritative for new creates while leaving already-imported state
-  # alone. Confirmed against run 30840012739's residual diff:
-  # create_method, id_attribute, ignore_all_server_changes appearing as
-  # "+ create" and debug as "-> null" were the only remaining changes once
-  # data was already ignored.
+  # anything the API server holds, and none of them affect anything
+  # observable outside this provider's own bookkeeping. An import (see the
+  # state_import escape hatch above) leaves them unset in the imported
+  # state, which then shows up as a plan diff against this config on the
+  # next run even though nothing about the object changed. Because this
+  # resource has no working PUT (see above), letting Terraform reconcile
+  # that diff means an in-place update attempt that 500s. ignore_changes on
+  # these three, same as on data, keeps config authoritative for new
+  # creates while leaving already-imported state alone.
+  #
+  # debug is deliberately excluded from this list even though run
+  # 30840012739's residual diff included it ("debug = true -> null"): it is
+  # security-relevant, not cosmetic, since it toggles the provider's own
+  # HTTP request/response logging for this resource, and ignore_changes
+  # would silently keep whatever debug value an import happened to leave
+  # in state forever, including a stray `true` writing credential-bearing
+  # OAuth payloads to CI logs on every future run. If existing state has
+  # debug = true from that import, plan will keep showing this one
+  # attribute as drift, and applying it hits the same broken-PUT 500 as any
+  # other data/attribute change. Clear it the same way a real payload
+  # change is applied: a targeted replace,
+  #   terraform apply -replace='restapi_object.oauth_app["<key>"]'
+  # which recreates the object with debug = false from config, rather than
+  # an ignore_changes entry that would need to stay forever.
   lifecycle {
-    ignore_changes = [data, create_method, id_attribute, ignore_all_server_changes, debug]
+    ignore_changes = [data, create_method, id_attribute, ignore_all_server_changes]
   }
 }
 
