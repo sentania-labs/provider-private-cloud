@@ -170,6 +170,26 @@ restapi_object.oauth_app["all_apps"]=/suite-api/api/fleet-management/iam/ssoreal
 
 Do this before touching `state_rm` again or running a plain `plan-and-apply`: with the two apps absent from state, the very next apply would try to CREATE them again and fail with the same 400 (or worse, if the duplicate-name check ever passed, would mint new client ids the live OIDC configs don't have). After import, a plan should show no changes for these two `restapi_object.oauth_app` resources (their live `data` already matches config) beyond whatever drift normal refresh surfaces.
 
+**CLI `state_import` is confirmed broken for `restapi_object.oauth_app` when the entry is missing from state.** `orgs.tf` references `restapi_object.oauth_app[each.key]` from two other places (`oauth_app_rotate_path`'s local, and `module.orgs`' `client_id` input), and with the instance missing from state those references fail at eval time with an "Invalid index" error before a `terraform import` CLI call even gets to commit. For this specific resource, use the `oauth_app_imports` import-block recovery path below instead. `state_import` remains the right tool for any other resource nothing else in this config indexes into.
+
+### Escape hatch: `oauth_app_imports` import block (recovering `restapi_object.oauth_app` specifically)
+
+`orgs.tf` has a top-level `import` block, keyed off `var.oauth_app_imports` (`map(string)`, default `{}`, org key to full OAuth-app API path, same shape/id format as `state_import`'s `addr=id` pairs above). Unlike CLI import, an `import` block is evaluated as part of the plan graph, so a missing `restapi_object.oauth_app` instance becomes a planned create/import for that resource instead of a hard eval-time error on the cross-references described above.
+
+`configure-private-cloud.yml`'s `workflow_dispatch` trigger has a matching `oauth_app_imports` input: a JSON map of org key to full OAuth-app API path, passed through verbatim to `TF_VAR_oauth_app_imports` when non-empty (no reshaping needed, it's already the right JSON shape for a `map(string)`). To use it:
+
+1. Trigger `workflow_dispatch` with `oauth_app_imports` set to the JSON map below and `apply` left at its default `false` (plan-only). The plan will propose creating/importing only the entries genuinely missing from state, and show no changes for anything already present, so this run is also how you discover which keys are actually still needed.
+2. Review the plan.
+3. Re-run with `apply=true` if it looks right.
+
+If a key is already present in state (the first CLI-import attempt against `all_apps` may or may not have persisted, this is unknown), Terraform's import will error that the resource is already managed. In that case, drop that key from the `oauth_app_imports` map and re-run with only the remaining key(s).
+
+Recovery value reference, same two org keys and object ids as the pending `state_import` recovery step above, formatted for direct use as the `oauth_app_imports` input value:
+
+```json
+{"all_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/f42c4cd4-bb2a-48f4-a711-677e73c8cd72","vm_apps":"/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/5c0d6833-b21a-462f-96bb-c3484c8bad8b"}
+```
+
 ## Break-glass local admins and tenant CI credentials (design note, not implemented here)
 
 Each org's `local_admin` (see `orgs.tf`'s root-level `data.vcfa_role` + `vcfa_org_local_user`, and `envs/lab.tfvars`) exists for one reason: **federated OIDC users authenticate through an interactive browser redirect and cannot mint an API token non-interactively from CI.** A local, non-federated admin account is the only way to bootstrap tenant-repo credentials headlessly.

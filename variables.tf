@@ -250,3 +250,20 @@ variable "local_admin_passwords" {
   sensitive   = true
   default     = {}
 }
+
+/**
+ * oauth_app_imports
+ * Recovery-only: map of org key (matches var.orgs) to the full API path of an
+ * existing OAuth app object to adopt into state via an import block (orgs.tf).
+ * Leave empty in normal operation. See README's escape-hatch section for why
+ * this exists instead of the CLI state_import input: when both an org's
+ * restapi_object.oauth_app entry is missing from state, orgs.tf's other
+ * references to it (the rotate-path local, module.orgs' client_id input) fail
+ * eval with "Invalid index" before a CLI import even commits, so recovery for
+ * this specific resource has to go through an import block instead.
+ */
+variable "oauth_app_imports" {
+  type        = map(string)
+  description = "Recovery-only: map of org key (matches var.orgs) to the full API path of an existing OAuth app object to adopt into state via an import block. Leave empty in normal operation. Supply via TF_VAR_oauth_app_imports, or the oauth_app_imports workflow_dispatch input in CI."
+  default     = {}
+}
