@@ -381,22 +381,45 @@ jobs:
       # grant_type=refresh_token before it can be used as a Bearer token,
       # mirrored below.
       #
-      # A curl failure (auth error, non-2xx, network error) fails this step
-      # under `set -e` with `curl -sf`, rather than silently defaulting
-      # either way: "API call failed" must abort the job, not be treated as
-      # "library doesn't exist". Only a clean 200 with an empty/non-matching
-      # result set is treated as a legitimate "does not exist yet".
+      # A curl failure (auth error, non-2xx, network error) fails this step,
+      # rather than silently defaulting either way: "API call failed" must
+      # abort the job, not be treated as "library doesn't exist". Only a
+      # clean 200 with an empty/non-matching result set is treated as a
+      # legitimate "does not exist yet". Status is captured explicitly
+      # (rather than relying on `curl -f`) so a transport-level failure
+      # (status "000": TLS, DNS, connectivity, curl never got an HTTP
+      # response) can be told apart from a real non-2xx HTTP status from the
+      # API, same pattern as the "Exchange vIDB API token" step above.
       - name: Probe for existing content library
         run: |
           set -euo pipefail
 
           vcfa_url=$(grep '^vcfa_url' envs/lab.tfvars | cut -d '"' -f2)
 
-          access_token=$(curl -sf -X POST "$vcfa_url/oauth/provider/token" \
+          # -k: this runner does not trust the lab CA that signs
+          # vcf-lab-automation.int.sentania.net. The vcfa terraform provider
+          # already runs against this same host with
+          # allow_unverified_ssl = var.insecure (true in envs/lab.tfvars,
+          # this is a lab), so this mirrors that already-accepted trust
+          # decision rather than being a general "skip TLS" choice.
+          token_body_file=$(mktemp)
+          trap 'rm -f "$token_body_file"' EXIT
+
+          token_status=$(curl -sk -o "$token_body_file" -w '%{http_code}' -X POST "$vcfa_url/oauth/provider/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=refresh_token" \
-            --data-urlencode "refresh_token=$TF_VAR_vcfa_api_token" \
-            | jq -r '.access_token')
+            --data-urlencode "refresh_token=$TF_VAR_vcfa_api_token") || token_status="000"
+
+          if [ "${token_status:0:1}" != "2" ]; then
+            if [ "$token_status" = "000" ]; then
+              echo "VCFA token request failed: transport-level failure (connectivity/TLS/DNS), no HTTP response" >&2
+            else
+              echo "VCFA token request failed with HTTP status: $token_status" >&2
+            fi
+            exit 1
+          fi
+
+          access_token=$(jq -r '.access_token' "$token_body_file")
           echo "::add-mask::$access_token"
 
           if [ -z "$access_token" ] || [ "$access_token" = "null" ]; then
@@ -404,10 +427,24 @@ jobs:
             exit 1
           fi
 
-          response=$(curl -sf -G "$vcfa_url/cloudapi/vcf/contentLibraries/" \
+          response_body_file=$(mktemp)
+          trap 'rm -f "$token_body_file" "$response_body_file"' EXIT
+
+          response_status=$(curl -sk -o "$response_body_file" -w '%{http_code}' -G "$vcfa_url/cloudapi/vcf/contentLibraries/" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json;version=40.0" \
-            --data-urlencode "filter=name==vcf-lab-content-library")
+            --data-urlencode "filter=name==vcf-lab-content-library") || response_status="000"
+
+          if [ "${response_status:0:1}" != "2" ]; then
+            if [ "$response_status" = "000" ]; then
+              echo "Content library list request failed: transport-level failure (connectivity/TLS/DNS), no HTTP response" >&2
+            else
+              echo "Content library list request failed with HTTP status: $response_status" >&2
+            fi
+            exit 1
+          fi
+
+          response=$(cat "$response_body_file")
 
           if ! echo "$response" | jq -e 'has("values")' >/dev/null; then
             echo "Unexpected response from the content library list endpoint (no 'values' field)" >&2
