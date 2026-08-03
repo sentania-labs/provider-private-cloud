@@ -56,6 +56,16 @@ locals {
     for k, o in local.oidc_orgs :
     k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}/rotate"
   }
+
+  # The oauth_app_rotate resource below has no real GET-able counterpart
+  # (the rotate path is a bare POST action), so it needs an explicit
+  # read_path override pointing back at the underlying OAuth app object
+  # instead. See the long comment on oauth_app_rotate for why this is
+  # required on Mastercard/restapi v2.0.1, not optional polish.
+  oauth_app_read_path = {
+    for k, o in local.oidc_orgs :
+    k => "/suite-api/api/fleet-management/iam/ssorealms/${var.sso_realm_id}/oauth-apps/${restapi_object.oauth_app[k].id}"
+  }
 }
 
 # Rotation is on-demand, never on every apply (ruling 4). This resource
@@ -90,6 +100,38 @@ locals {
 # do that: to stop managing an org's OIDC federation, set is_enabled=false
 # or remove the org from var.orgs entirely (which also destroys
 # module.orgs' vcfa_org_oidc), not just its oidc block.
+#
+# read_path override (v2.0.1-specific, confirmed against
+# Mastercard/terraform-provider-restapi v2.0.1 source,
+# restapi/resource_api_object.go): unlike the plugin-framework v3 line,
+# this SDKv2-based generation always calls the resource's Read on every
+# `terraform plan`/`apply` refresh, regardless of ignore_all_server_changes
+# (that flag only suppresses drift-correction on `data`, not the GET call
+# itself). Left at its default (path/{id}, i.e. the rotate path with this
+# resource's synthetic object_id appended), that GET 404s every time,
+# since the rotate path isn't a real GET-able resource. On a 404 the
+# provider clears the object's id and Terraform treats it as deleted,
+# forcing a recreate (and therefore a real rotate call) on every single
+# apply -- exactly the "never on every apply" behavior this resource
+# exists to prevent. Pointing read_path at the underlying OAuth app's real
+# object endpoint instead (confirmed GET-able, same id used by
+# oauth_app's own read_path default) keeps the id valid across refreshes
+# and is harmless: ignore_all_server_changes still prevents that read from
+# ever rewriting `data`.
+#
+# Residual, documented limitation: because that read genuinely hits the
+# OAuth app object, not the rotate action, it does not return clientSecret,
+# so api_response gets overwritten with non-secret data on the next
+# refresh after any apply that touches this resource. api_response is
+# still correct at the moment a rotation is actually applied (both create
+# and update populate it directly from that call's own response body, per
+# write_returns_object/create_returns_object -- confirmed in
+# api_object.go's createObject()/updateObject(), neither of which calls
+# readObject() when those flags are set), so module.orgs sees the right
+# secret within the same apply a rotation happens in. Whether it stays
+# readable/correct across a later plan-only refresh is unverified against
+# a live Ops instance: same caveat already carried in README's "restapi
+# provider limitations" section, not new to this version pin.
 resource "restapi_object" "oauth_app_rotate" {
   for_each = local.oauth_app_rotate_path
 
@@ -98,6 +140,7 @@ resource "restapi_object" "oauth_app_rotate" {
   create_method = "POST"
   update_method = "POST"
   update_path   = each.value
+  read_path     = local.oauth_app_read_path[each.key]
 
   ignore_all_server_changes = true
 
@@ -138,13 +181,17 @@ module "orgs" {
     prefer_id_token        = each.value.oidc.prefer_id_token
     groups                 = each.value.oidc.groups
   }
-  # api_response is documented as "the raw body of the HTTP response from
-  # the last read of the object" -- whether the provider populates it from
-  # the write call itself (create/update) or only from a subsequent read is
-  # not confirmed against a live Ops instance. If it turns out stale/empty
-  # here, api_data (the fmt-stringified map) or create_response are the
-  # fallbacks to try; flagged in README's restapi-provider-limitations
-  # section as something to verify before a first real apply.
+  # api_response is documented (Mastercard/restapi v2.0.1 docs) as "the raw
+  # body of the HTTP response from the last read of the object." Confirmed
+  # against v2.0.1 source (api_object.go createObject()/updateObject()):
+  # with write_returns_object/create_returns_object set (provider.tf), both
+  # create and update populate api_response directly from that call's own
+  # response body, never from a subsequent GET -- so this holds the rotate
+  # response, including clientSecret, at the point a rotation is applied.
+  # See the read_path comment on oauth_app_rotate above for the one
+  # documented gap: a plan-only refresh between applies overwrites
+  # api_response with the (secret-less) underlying OAuth app object, which
+  # is still unverified against a live Ops instance.
   oidc_client_secret = each.value.oidc == null ? null : jsondecode(restapi_object.oauth_app_rotate[each.key].api_response)["clientSecret"]
 }
 
