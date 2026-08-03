@@ -117,7 +117,7 @@ Supplied via `TF_VAR_*` (see the CI workflow for the exact secret names):
 
 - `vcfa_api_token`: VCF Admin service-account API token for the vcfa provider (org System), issued from the provider portal
 - `ops_api_base_url`: base URL of the VCF Operations fleet-management IAM API
-- `ops_api_token`: short-lived Ops API token. Not a stored secret: CI acquires it at runtime from `VCF_LAB_OPS_USER` / `VCF_LAB_OPS_PASSWORD` before any terraform step, see "Ops API auth" below
+- `ops_api_token`: short-lived Ops API bearer token. Not a stored secret: CI exchanges the durable `VCF_LAB_API_TOKEN` vIDB user API token for it via the vIDB token exchange flow before any terraform step, see "Ops API auth" below
 - `local_admin_passwords`: per-org break-glass local admin passwords, JSON map keyed the same as `var.orgs`. In CI this is built from the single `VCFA_FIRST_USER_DEFAULT_PASSWORD` secret (one shared password for both orgs for now), not supplied directly as a JSON secret, see "Repo secrets the workflow expects" below
 
 `sso_realm_id`, `oidc_wellknown_endpoint`, and `external_cidr` are identifiers/URLs, not secrets, and are committed in `envs/lab.tfvars` (see their sections below for provenance).
@@ -171,10 +171,12 @@ The vcfa provider (`provider.tf`) uses `api_token` auth against org `System`, fe
 
 ## Ops API auth
 
-Two things changed here from the original build:
+The suite-api username/password acquire endpoint (`/suite-api/api/auth/token/acquire`) cannot be used here: the CI account (`vcf@int.sentania.net`) is vIDB/SSO-backed, and that endpoint rejects SSO-backed accounts outright, proven live with 401s even with `authSource: "VCF SSO"` set. The fix is the officially documented vIDB **token exchange** flow instead, which produces a standard Bearer token suite-api accepts (confirmed working in the lab, documented in Broadcom techdocs "Token Exchange").
 
-1. **Scheme**: the `restapi` provider's `Authorization` header is `"OpsToken <token>"`, not `"Bearer <token>"`. Confirmed against live-appliance recon documented in `lab-admin`'s `docs/sops/vcfa-ops-orphan-component-removal.md`.
-2. **Token acquisition**: Ops tokens are short-lived and acquired via a login round-trip, not stored. Scott's created secrets are `VCF_LAB_OPS_USER` / `VCF_LAB_OPS_PASSWORD` (username/password), not a token. The `plan-and-apply` job's "Acquire Ops API token" step runs *before any terraform step*, `POST`s to `<ops_api_base_url>/suite-api/api/auth/token/acquire` with `{"username", "password", "authSource"}`, parses the token out of the JSON response with `curl` + `jq`, masks it with `::add-mask::`, and exports it as `TF_VAR_ops_api_token` via `GITHUB_ENV` for every step after it. This ordering dependency (token acquired outside Terraform, must run before `init`/`plan`/`apply`) is load-bearing: don't reorder the workflow steps. `authSource` must be `"VCF SSO"`: the stored CI account (`vcf@int.sentania.net`) is SSO-backed, not local, and the appliance rejects the request without it. Confirmed live via `GET /suite-api/api/auth/sources`: the appliance's single auth source is id `841fafcb-445e-4b16-9634-f09480f1836b`, type VIDB, name "VCF SSO". A manual reproduction of this request (e.g. for debugging) must include the same field or it will hit the same rejection.
+1. **Stored secret**: `VCF_LAB_API_TOKEN`, a durable vIDB user API token for `vcf@int.sentania.net` (VCF Admin role, 180-day expiry), not a username/password pair and not the token actually used against suite-api.
+2. **Token exchange**: the `plan-and-apply` job's "Exchange vIDB API token for Ops API bearer token" step runs *before any terraform step*, `POST`s to `https://vcf-lab-idb.int.sentania.net/acs/t/CUSTOMER/token` (same host+tenant path as `oidc_wellknown_endpoint` in `envs/lab.tfvars`) with `Content-Type: application/x-www-form-urlencoded` and body `grant_type=urn:custom:vcf:params:oauth:grant-type:api-token`, `api_token=<VCF_LAB_API_TOKEN>`, parses `.access_token` out of the JSON response with `curl` + `jq`, masks it with `::add-mask::`, and exports it as `TF_VAR_ops_api_token` via `GITHUB_ENV` for every step after it. This ordering dependency (token acquired outside Terraform, must run before `init`/`plan`/`apply`) is load-bearing: don't reorder the workflow steps.
+3. **Scheme**: the exchanged bearer token is presented to the `restapi` provider's `Authorization` header as `"Bearer <token>"`, not the old `"OpsToken <token>"` scheme (that scheme was specific to the retired suite-api acquire flow).
+4. **Lifetimes**: `VCF_LAB_API_TOKEN` itself is durable (180-day expiry, created 2026-08-03, due for regeneration around 2027-01-30); the bearer token it exchanges for is short-lived, roughly 30 minutes, which is why the exchange runs fresh on every CI invocation rather than being cached.
 
 The self-hosted runner needs `curl` and `jq` available; not verified from this workspace.
 
@@ -223,12 +225,12 @@ Check these against the repo's actual Settings > Secrets > Actions page:
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: S3 backend (both stages: platform's `terraform.tfstate` and content's `content.tfstate`)
 - `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account). Used by both the platform stage and the `content` job: content library operations are org System, PROVIDER-scoped, same auth as the platform root.
-- `VCF_LAB_OPS_USER`, `VCF_LAB_OPS_PASSWORD`: exchanged at CI runtime for a short-lived Ops API token, see "Ops API auth" above
+- `VCF_LAB_API_TOKEN`: durable vIDB user API token for the `vcf@int.sentania.net` service account (VCF Admin role, 180-day expiry, created 2026-08-03, due for regeneration around 2027-01-30). Exchanged at CI runtime for a short-lived (~30 minute) Ops API bearer token, see "Ops API auth" above
 - `VCFA_FIRST_USER_DEFAULT_PASSWORD`: single shared password for both orgs' break-glass local admin users. The "Build local admin passwords" step turns it into the `map(string)` JSON `TF_VAR_local_admin_passwords` wants (keyed `all_apps`/`vm_apps`) via `jq -nc --arg`, reading the value from an env var rather than interpolating it into a shell command string, so it never lands in a logged command line.
 
 `ops_api_base_url` is no longer a repo secret: it's a known lab hostname (`https://vcf-lab-operations.int.sentania.net`), set as a plain `TF_VAR_ops_api_base_url` workflow env in `plan-and-apply`'s job-level env block.
 
-No other secrets should be referenced anywhere in the workflow. In particular `VCF_LAB_SYSTEM_ADMIN_USERNAME`, `VCF_LAB_SYSTEM_ADMIN_PASSWORD`, `VCF_OPS_API_TOKEN`, `VCF_OPS_SSO_REALM_ID`, `VCF_LAB_EXTERNAL_CIDR`, and `VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS` (referenced by earlier builds of this workflow) are gone: superseded by `vcfa_api_token`, the Ops token-acquire step, the committed `sso_realm_id` / `external_cidr` values, and `VCFA_FIRST_USER_DEFAULT_PASSWORD` respectively. There is exactly one password source now, not two.
+No other secrets should be referenced anywhere in the workflow. In particular `VCF_LAB_SYSTEM_ADMIN_USERNAME`, `VCF_LAB_SYSTEM_ADMIN_PASSWORD`, `VCF_OPS_API_TOKEN`, `VCF_OPS_SSO_REALM_ID`, `VCF_LAB_EXTERNAL_CIDR`, `VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS`, and (as of the vIDB token exchange switch) `VCF_LAB_OPS_USER` / `VCF_LAB_OPS_PASSWORD` are gone: superseded by `vcfa_api_token`, the vIDB token exchange step, the committed `sso_realm_id` / `external_cidr` values, `VCFA_FIRST_USER_DEFAULT_PASSWORD`, and `VCF_LAB_API_TOKEN` respectively.
 
 ## Dry run before merge
 
