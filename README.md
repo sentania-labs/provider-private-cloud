@@ -162,6 +162,20 @@ restapi_object.oauth_app["all_apps"], restapi_object.oauth_app["vm_apps"]
 
 so the v2 provider never tries to refresh state entries written by v3 (which is what would otherwise immediately re-trigger the same class of bug, or a different v2/v3 schema mismatch, on the very next apply). As of this writing, those are the only two `restapi_object` entries in state: the `oauth_app_rotate` resources and the org OIDC federation configs were never actually created, since the failing run never got past `terraform plan`, so there is nothing else to remove.
 
+### Escape hatch: `terraform state import` via workflow_dispatch (recovering from a bad state_rm)
+
+`configure-private-cloud.yml`'s `workflow_dispatch` trigger also has an optional `state_import` input, symmetric to `state_rm` and run strictly after it: a space or comma separated list of `addr=id` pairs, each run as `terraform import -- "<addr>" "<id>"` before planning. This exists for the failure mode `state_rm` itself can cause: a stale run executes `state_rm` against a resource a different, newer run already created live, and a subsequent apply then tries to CREATE an object that already exists (VCFA IAM's oauth-apps endpoint 400s on duplicate `clientName`, "display name exists"). The right fix there is not "recreate it", the OAuth app is live and is already the `client_id` the org's `vcfa_org_oidc` config authenticates with; recreating would mint a different object and break that federation. The fix is putting the existing live object back into Terraform state via import.
+
+**Import id format for `restapi_object` (Mastercard/restapi v2.0.1)**: confirmed from the provider's own `resourceRestAPIImport` (`restapi/resource_api_object.go`) and its documented example (`examples/resources/restapi_object/import.sh`, `terraform import restapi_object.object /api/objects/123`): the import id is the object's **full API path including the object id** (`/<full path from server root>/<object id>`), not the bare id. The importer derives `path` from everything before the last `/` and the object id from what follows it, so for `oauth_app`'s resource shape (`path = ".../ssorealms/${var.sso_realm_id}/oauth-apps"`, `id_attribute = "id"`), the import id per app is `<path>/<object id>`. This is a real, working import path on v2.0.1, not a v2/v3 quirk to route around: no `import` block fallback is needed here.
+
+**Pending recovery step for this repo, right now**: a stale run's `state_rm` removed both live OAuth apps from state after a newer run had already created them (object ids confirmed live and referenced by both orgs' working `vcfa_org_oidc` configs). Before the next `plan-and-apply` run, trigger `workflow_dispatch` with `state_import` set to (realm id `83369e94-bcad-4674-ba0d-e4b8b70730ee`):
+
+```
+restapi_object.oauth_app["all_apps"]=/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/f42c4cd4-bb2a-48f4-a711-677e73c8cd72, restapi_object.oauth_app["vm_apps"]=/suite-api/api/fleet-management/iam/ssorealms/83369e94-bcad-4674-ba0d-e4b8b70730ee/oauth-apps/5c0d6833-b21a-462f-96bb-c3484c8bad8b
+```
+
+Do this before touching `state_rm` again or running a plain `plan-and-apply`: with the two apps absent from state, the very next apply would try to CREATE them again and fail with the same 400 (or worse, if the duplicate-name check ever passed, would mint new client ids the live OIDC configs don't have). After import, a plan should show no changes for these two `restapi_object.oauth_app` resources (their live `data` already matches config) beyond whatever drift normal refresh surfaces.
+
 ## Break-glass local admins and tenant CI credentials (design note, not implemented here)
 
 Each org's `local_admin` (see `orgs.tf`'s root-level `data.vcfa_role` + `vcfa_org_local_user`, and `envs/lab.tfvars`) exists for one reason: **federated OIDC users authenticate through an interactive browser redirect and cannot mint an API token non-interactively from CI.** A local, non-federated admin account is the only way to bootstrap tenant-repo credentials headlessly.

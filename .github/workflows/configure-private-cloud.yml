@@ -16,6 +16,10 @@ on:
         description: "Optional: space or comma separated terraform state addresses to `terraform state rm` before planning (e.g. state surgery for provider migrations)"
         type: string
         default: ""
+      state_import:
+        description: "Optional: space or comma separated addr=id pairs to `terraform import` after state_rm and before planning (e.g. re-importing an object that state surgery removed by mistake)"
+        type: string
+        default: ""
 
 jobs:
   # Runs on every push and PR (fork-gated). No secrets: fmt-check and a
@@ -218,6 +222,55 @@ jobs:
               [ -z "$addr" ] && continue
               echo "Removing from state: $addr"
               terraform state rm -- "$addr"
+            done
+          done
+
+      # Optional manual escape hatch, symmetric to state_rm above and run
+      # strictly after it: CI-native re-import (no SSH, no local state file
+      # edits) for cases like state_rm's own failure mode, where a stale
+      # second run executed a by-then-outdated state_rm against a resource
+      # that a first run had already created live. The right fix there is
+      # not "recreate it" (a new create call against an object that already
+      # exists live, and is already referenced elsewhere, fails or diverges
+      # identity), it's putting the existing live object back into state.
+      # Same workflow_dispatch-only gating as state_rm.
+      - name: Terraform state import (manual escape hatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          STATE_IMPORT_INPUT: ${{ inputs.state_import }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$STATE_IMPORT_INPUT" ]; then
+            echo "No state_import input provided, skipping state import."
+            exit 0
+          fi
+
+          # Same split strategy as state_rm: commas first, then whitespace
+          # within each piece. Each pair is "<address>=<id>"; addresses like
+          # restapi_object.oauth_app["all_apps"] contain brackets and quotes
+          # but never spaces or '=', and provider import ids here are full
+          # API paths (slashes/dashes, no spaces or '='), so splitting the
+          # pair on the first '=' is unambiguous.
+          echo "$STATE_IMPORT_INPUT" | tr ',' '\n' | while IFS= read -r line; do
+            for pair in $line; do
+              [ -z "$pair" ] && continue
+
+              if [[ "$pair" != *"="* ]]; then
+                echo "Malformed state_import pair (expected addr=id, got '$pair')" >&2
+                exit 1
+              fi
+
+              addr="${pair%%=*}"
+              id="${pair#*=}"
+
+              if [ -z "$addr" ] || [ -z "$id" ]; then
+                echo "Malformed state_import pair (empty address or id in '$pair')" >&2
+                exit 1
+              fi
+
+              echo "Importing into state: $addr <- $id"
+              terraform import -- "$addr" "$id"
             done
           done
 
