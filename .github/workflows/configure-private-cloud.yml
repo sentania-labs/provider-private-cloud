@@ -76,12 +76,13 @@ jobs:
       # at runtime by the step below and exported via GITHUB_ENV.
       TF_VAR_ops_api_base_url: ${{ secrets.VCF_OPS_API_BASE_URL }}
 
-      # local_admin_passwords is a map(string): an unset secret resolves to
-      # an empty string, which is not valid HCL/JSON for a complex-typed
-      # TF_VAR and breaks `terraform plan` with a parse error rather than
-      # falling back to the variable's own default. Fall back to '{}' here
-      # instead.
-      TF_VAR_local_admin_passwords: ${{ secrets.VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS || '{}' }}
+      # Single shared password (Scott: one password for both orgs' break-glass
+      # admins for now) exposed only as an env var, never interpolated
+      # straight into a shell command: the "Build local admin passwords"
+      # step below turns it into the map(string) JSON TF_VAR wants via
+      # `jq -n --arg`, which keeps the raw value out of any logged command
+      # line the same way the Ops token acquire step below avoids it.
+      VCFA_FIRST_USER_DEFAULT_PASSWORD: ${{ secrets.VCFA_FIRST_USER_DEFAULT_PASSWORD }}
 
     steps:
       - name: Checkout repository
@@ -100,6 +101,18 @@ jobs:
             | jq -r '.token')
           echo "::add-mask::$token"
           echo "TF_VAR_ops_api_token=$token" >> "$GITHUB_ENV"
+
+      # Builds the map(string) JSON that TF_VAR_local_admin_passwords needs,
+      # keyed by both org keys in var.orgs (all_apps, vm_apps), from the
+      # single shared VCFA_FIRST_USER_DEFAULT_PASSWORD secret above.
+      # `jq -n --arg` reads the value from the env var rather than
+      # interpolating it into the command string, so it never appears in
+      # the runner's command log even before GitHub's own masking applies.
+      - name: Build local admin passwords
+        run: |
+          passwords=$(jq -nc --arg pw "$VCFA_FIRST_USER_DEFAULT_PASSWORD" \
+            '{all_apps: $pw, vm_apps: $pw}')
+          echo "TF_VAR_local_admin_passwords=$passwords" >> "$GITHUB_ENV"
 
       # Plain init, not -migrate-state: that flag is for migrating between
       # backend configurations (e.g. changing backend.tf's bucket/key), and

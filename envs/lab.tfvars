@@ -16,11 +16,12 @@ tier0_gateway_name = "vcf-lab-wld01-gw"
 region_name          = "vcf-lab-region01"
 storage_policy_names = ["iscsi-default-policy"]
 
-# Scott's phased apply plan: phase 1 is region + external IP space +
-# provider gateway only, no orgs. Ships false for that phase-1 test;
-# flipping to true is the explicit phase-2 go, not something to flip
-# silently.
-enable_orgs = false
+# Scott's phased apply plan: phase 1 was region + external IP space +
+# provider gateway only, no orgs (that apply is done, on main). Merging
+# this PR IS the phase-2 apply: it creates both orgs, their local admin
+# users, OIDC federation, org networking, and region quotas, on Scott's
+# explicit go given during this PR's development.
+enable_orgs = true
 
 # Realm "VCF Lab", the only realm on the appliance (Ops 9.1.0.0 build
 # 25541561). An identifier, not a secret: committed here instead of
@@ -42,6 +43,9 @@ content_libraries = {
     name                = "vcf-lab-content-library"
     storage_class_names = ["iscsi-default-policy"]
     items               = []
+    subscription_config = {
+      subscription_url = "https://vcf-lab-vcenter-mgmt.int.sentania.net:443/cls/vcsp/lib/84ca4972-b3b4-4600-9f02-4634054269ad/lib.json"
+    }
   }
 }
 
@@ -63,6 +67,14 @@ orgs = {
     name         = "vcf-lab-all-apps"
     display_name = "VCF Lab All Apps"
     is_enabled   = true
+    # Break-glass local admin: federated OIDC users authenticate through a
+    # browser redirect and can't mint a vcfa_api_token non-interactively
+    # from CI, so a local (non-federated) admin bootstraps tenant-repo
+    # credentials headlessly. See README's tenant token minting section.
+    local_admin = {
+      username  = "admin"
+      role_name = "Organization Administrator"
+    }
     oidc = {
       groups = [
         { name = "labadmins@int.sentania.net", role = "Organization Administrator" },
@@ -91,6 +103,11 @@ orgs = {
     name         = "vcf-lab-vm-apps"
     display_name = "VCF Lab VM Apps"
     is_enabled   = true
+    # Break-glass local admin, same rationale as all_apps above.
+    local_admin = {
+      username  = "admin"
+      role_name = "Organization Administrator"
+    }
     oidc = {
       groups = [
         { name = "labadmins@int.sentania.net", role = "Organization Administrator" },

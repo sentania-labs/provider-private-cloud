@@ -41,7 +41,8 @@ Read before the first real apply against the lab:
 1. **`roles.tf` is still an empty scaffold.** Capturing which of the pre-teardown lab's custom roles/rights bundles were custom (versus stock) requires diffing against Scott's pre-teardown `vcfa-state.json` capture, which isn't available in this workspace. See "Open decisions" below.
 2. **S3 bucket encryption-at-rest is unconfirmed.** No AWS credentials are available in this workspace to check. See "State is credential-bearing" below.
 3. **Redirect/logout URLs registered on the OAuth app are best-effort**, not confirmed against a live OIDC client registration. The `/oauth/callback` suffix in particular is an unverified guess pending a first real apply. See "OAuth app redirect/logout URLs" below.
-4. **`enable_orgs = false` in `envs/lab.tfvars` is deliberate.** This ships as Scott's phase-1 test (region + external IP space + provider gateway only, no orgs). Flipping it to `true` is the explicit phase-2 go, not something to do silently. See "Phased apply" below.
+4. **`enable_orgs = true` in `envs/lab.tfvars` is the phase-2 apply.** Phase 1 (region + external IP space + provider gateway only, no orgs) is already applied on `main`. Merging the PR that flips this flag to `true` builds both orgs, their break-glass local admins, OIDC federation, org networking, and region quotas, on Scott's explicit go. See "Phased apply" below.
+5. **`provider_library` switching to a subscribed library forces a destroy/recreate.** It was applied in phase 1 as an empty local library; `subscription_url` is `ForceNew` on the provider's `vcfa_content_library` resource, so the next apply against `main` replaces it (empty local library torn down, subscribed library created in its place). No content loss, since the phase-1 library was never populated. The publisher endpoint (`vcf-lab-vcenter-mgmt.int.sentania.net:443`) presents a cert signed by the lab's own CA; if VCFA or the provider needs explicit trust configured for that endpoint before it can subscribe, that's a plausible first-apply failure, not pre-solved here.
 
 ## Registry modules consumed
 
@@ -57,7 +58,7 @@ Supplied via `TF_VAR_*` (see the CI workflow for the exact secret names):
 - `vcfa_api_token`: VCF Admin service-account API token for the vcfa provider (org System), issued from the provider portal
 - `ops_api_base_url`: base URL of the VCF Operations fleet-management IAM API
 - `ops_api_token`: short-lived Ops API token. Not a stored secret: CI acquires it at runtime from `VCF_LAB_OPS_USER` / `VCF_LAB_OPS_PASSWORD` before any terraform step, see "Ops API auth" below
-- `local_admin_passwords`: per-org local admin passwords, JSON map keyed the same as `var.orgs`
+- `local_admin_passwords`: per-org break-glass local admin passwords, JSON map keyed the same as `var.orgs`. In CI this is built from the single `VCFA_FIRST_USER_DEFAULT_PASSWORD` secret (one shared password for both orgs for now), not supplied directly as a JSON secret, see "Repo secrets the workflow expects" below
 
 `sso_realm_id`, `oidc_wellknown_endpoint`, and `external_cidr` are identifiers/URLs, not secrets, and are committed in `envs/lab.tfvars` (see their sections below for provenance).
 
@@ -81,6 +82,18 @@ The `Mastercard/restapi` provider models everything as a `restapi_object` (a RES
 - On first apply, Terraform's CREATE call also targets the rotate path (deliberately): the org's OAuth app is rotated immediately after being minted, so the rotate resource's response is the single source of truth for "the org's current secret" in every case, not just after an explicit rotation.
 - There is no server-side DELETE for a rotation action. Removing the rotate resource from config, or removing an org's `oidc` block after it's been applied, would issue a DELETE the API almost certainly doesn't support. Don't do that: see the comment block at the top of the rotate resource in `orgs.tf`.
 - The well-known-URL discovery lookup is no longer a `restapi_object` data source: see "SSO realm and OIDC discovery" below for why it's now a plain committed value.
+
+## Break-glass local admins and tenant CI credentials (design note, not implemented here)
+
+Each org's `local_admin` (see `orgs.tf`'s root-level `data.vcfa_role` + `vcfa_org_local_user`, and `envs/lab.tfvars`) exists for one reason: **federated OIDC users authenticate through an interactive browser redirect and cannot mint an API token non-interactively from CI.** A local, non-federated admin account is the only way to bootstrap tenant-repo credentials headlessly.
+
+The intended pattern for the tenant repos (`vm-apps-private-cloud`, `all-apps-private-cloud`), documented here for a future reader but **not implemented in this repo**:
+
+1. From the tenant repo (or a one-time bootstrap step), authenticate against the `vcfa` provider as that org's local admin user (username/password).
+2. That authenticated session mints a `vcfa_api_token` scoped to the local admin user. The token inherits the minting user's role/permissions (here, Organization Administrator), the provider requires `allow_token_file = true` on the resource, and the token value lands in both Terraform state and a local file, both credential-bearing artifacts needing the same handling discipline documented in "State is credential-bearing" above.
+3. The minted token becomes the tenant repo's own CI secret (e.g. `TF_VAR_vcfa_api_token` in that repo's workflow), not anything stored or minted in this repo.
+
+Minting itself belongs in the tenant repos or a small bootstrap script/workflow that lives alongside them, not here.
 
 ## External CIDR
 
@@ -153,9 +166,9 @@ Check these against the repo's actual Settings > Secrets > Actions page:
 - `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account)
 - `VCF_LAB_OPS_USER`, `VCF_LAB_OPS_PASSWORD`: exchanged at CI runtime for a short-lived Ops API token, see "Ops API auth" above
 - `VCF_OPS_API_BASE_URL`: base URL of the VCF Operations API. Existence unconfirmed, see "Open decisions" above.
-- `VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS` (optional): per-org local admin passwords map, falls back to `{}` if unset
+- `VCFA_FIRST_USER_DEFAULT_PASSWORD`: single shared password for both orgs' break-glass local admin users. The "Build local admin passwords" step turns it into the `map(string)` JSON `TF_VAR_local_admin_passwords` wants (keyed `all_apps`/`vm_apps`) via `jq -nc --arg`, reading the value from an env var rather than interpolating it into a shell command string, so it never lands in a logged command line.
 
-No other secrets should be referenced anywhere in the workflow. In particular `VCF_LAB_SYSTEM_ADMIN_USERNAME`, `VCF_LAB_SYSTEM_ADMIN_PASSWORD`, `VCF_OPS_API_TOKEN`, `VCF_OPS_SSO_REALM_ID`, and `VCF_LAB_EXTERNAL_CIDR` (referenced by an earlier build of this workflow) are gone: superseded by `vcfa_api_token`, the Ops token-acquire step, and the committed `sso_realm_id` / `external_cidr` values respectively.
+No other secrets should be referenced anywhere in the workflow. In particular `VCF_LAB_SYSTEM_ADMIN_USERNAME`, `VCF_LAB_SYSTEM_ADMIN_PASSWORD`, `VCF_OPS_API_TOKEN`, `VCF_OPS_SSO_REALM_ID`, `VCF_LAB_EXTERNAL_CIDR`, and `VCF_LAB_ORG_LOCAL_ADMIN_PASSWORDS` (referenced by earlier builds of this workflow) are gone: superseded by `vcfa_api_token`, the Ops token-acquire step, the committed `sso_realm_id` / `external_cidr` values, and `VCFA_FIRST_USER_DEFAULT_PASSWORD` respectively. There is exactly one password source now, not two.
 
 ## Dry run before merge
 
@@ -165,10 +178,12 @@ Merging to `main` triggers `plan-and-apply` with `-auto-approve` against the rea
 
 `var.enable_orgs` (`variables.tf`, gated through `local.effective_orgs` in `locals.tf`) lets Scott apply this repo in two phases instead of all at once:
 
-- **Phase 1** (`enable_orgs = false`, the current committed default in `envs/lab.tfvars`): region, external IP space, provider gateway, and content library only. No orgs, no org networking, no region quotas, no OIDC/OAuth client minting.
-- **Phase 2** (`enable_orgs = true`): everything in phase 1, plus `module.orgs`, `module.org_networking`, `vcfa_org_region_quota`, and the OAuth app mint/rotate resources, for every org in `var.orgs`.
+- **Phase 1** (`enable_orgs = false`): region, external IP space, provider gateway, and content library only. No orgs, no org networking, no region quotas, no OIDC/OAuth client minting. Already applied on `main`.
+- **Phase 2** (`enable_orgs = true`, the current committed value in `envs/lab.tfvars`): everything in phase 1, plus `module.orgs`, break-glass local admin users, `module.org_networking`, `vcfa_org_region_quota`, and the OAuth app mint/rotate resources, for every org in `var.orgs`. Merging the `feat/local-admin-break-glass` PR that set this flag to `true` **is** the phase-2 apply, on Scott's explicit go given during that PR's development, not a future separate commit.
 
-`var.orgs` itself is never emptied or hand-edited to move between phases: the full org config stays committed and ready in `envs/lab.tfvars`, and `enable_orgs` alone decides whether it gets built. Flipping it to `true` is an explicit phase-2 go, not something to do as a drive-by change.
+`var.orgs` itself is never emptied or hand-edited to move between phases: the full org config stays committed and ready in `envs/lab.tfvars`, and `enable_orgs` alone decides whether it gets built.
+
+**Known watch item for this phase-2 apply**: post-phase-1 verification found the new `172.18.0.0/16` external IP block (see "External CIDR" above) is not yet attached to the Default VPC Connectivity Profile in NSX. If org networking fails on external connectivity during the phase-2 apply, that non-attachment is the first suspect. This is an NSX-side fix, out of scope for this repo and this session: do not attempt to attach it from here.
 
 Security posture unchanged: `lint`'s fork-gating on `pull_request` is untouched, no secrets are ever exposed on `pull_request` events, no plan file is ever uploaded as a workflow artifact (including the new plan-only path), and the unconditional workspace cleanup step still runs after the credentialed job regardless of outcome.
 

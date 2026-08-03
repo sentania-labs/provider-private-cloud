@@ -44,6 +44,14 @@ resource "vcfa_content_library" "this" {
     for k, v in local.content_library_storage_classes : data.vcfa_storage_class.this[k].id
     if v.cl_key == each.key
   ]
+
+  dynamic "subscription_config" {
+    for_each = each.value.subscription_config != null ? [each.value.subscription_config] : []
+    content {
+      subscription_url = subscription_config.value.subscription_url
+      password         = subscription_config.value.password
+    }
+  }
 }
 
 locals {

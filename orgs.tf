@@ -9,7 +9,8 @@
 # limitations" sections before touching this file.
 
 locals {
-  oidc_orgs = { for k, o in local.effective_orgs : k => o if o.oidc != null }
+  oidc_orgs        = { for k, o in local.effective_orgs : k => o if o.oidc != null }
+  local_admin_orgs = { for k, o in local.effective_orgs : k => o if o.local_admin != null }
 }
 
 # Creates one OAuth App per org under the Ops SSO realm. The create response
@@ -107,8 +108,13 @@ module "orgs" {
   description  = each.value.description
   is_enabled   = each.value.is_enabled
 
-  local_admin          = each.value.local_admin
-  local_admin_password = each.value.local_admin == null ? null : var.local_admin_passwords[each.key]
+  # local_admin is deliberately not passed through to the module: the
+  # module's local_admin.role_ids wants raw role reference ids, which only
+  # exist once the org itself exists (see the root-level data.vcfa_role +
+  # vcfa_org_local_user below this module block). Feeding this module call
+  # a role id resolved from its own output would be a circular dependency.
+  local_admin          = null
+  local_admin_password = null
 
   oidc = each.value.oidc == null ? null : {
     client_id              = restapi_object.oauth_app[each.key].id
@@ -127,4 +133,26 @@ module "orgs" {
   # fallbacks to try; flagged in README's restapi-provider-limitations
   # section as something to verify before a first real apply.
   oidc_client_secret = each.value.oidc == null ? null : jsondecode(restapi_object.oauth_app_rotate[each.key].api_response)["clientSecret"]
+}
+
+# Break-glass local admin user, created at root rather than inside
+# module.orgs (see the local_admin=null comment on the module call above).
+# data.vcfa_role resolves the configured role NAME to the raw role id VCFA
+# actually wants, scoped to the org that now exists via module.orgs[key].id.
+# No cycle: module.orgs[key] is already fully specified by the time this
+# data source reads it, it doesn't depend on this lookup's result.
+data "vcfa_role" "local_admin" {
+  for_each = local.local_admin_orgs
+
+  name   = each.value.local_admin.role_name
+  org_id = module.orgs[each.key].id
+}
+
+resource "vcfa_org_local_user" "local_admin" {
+  for_each = local.local_admin_orgs
+
+  org_id   = module.orgs[each.key].id
+  username = each.value.local_admin.username
+  password = var.local_admin_passwords[each.key]
+  role_ids = [data.vcfa_role.local_admin[each.key].id]
 }
