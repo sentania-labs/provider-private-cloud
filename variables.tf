@@ -149,13 +149,23 @@ variable "oidc_wellknown_endpoint" {
  * ("%s/tenant/%s/oauth/callback") is NOT confirmed against a live OIDC client
  * registration -- VCFA computes its own true redirect URI only after
  * vcfa_org_oidc federation is created (module.orgs[*].oidc_redirect_uri), which
- * happens after this OAuth app is created, so this is a best-effort guess.
- * Override via -var if the real value differs after a first apply.
+ * happens after this OAuth app is created.
+ *
+ * CONFIRMED 2026-08-27, no longer a guess. The redirect pattern was
+ * "%s/tenant/%s/oauth/callback", which is wrong: OIDC login failed against
+ * the rebuilt vm-apps org until Scott corrected the value by hand in Ops to
+ *
+ *   https://vcf-lab-automation.int.sentania.net/login/oauth?service=tenant:vcf-lab-vm-apps
+ *
+ * i.e. "%s/login/oauth?service=tenant:%s". That exact URL was already on
+ * record in lab-admin (docs/vcfa-oidc-federation.md, and the inputs proposal
+ * that fed this repo) before the guess was written, so this was avoidable.
+ * Fixed here so an org rebuild stops needing a manual repair afterwards.
  */
 variable "oauth_app_redirect_url_pattern" {
   type        = string
-  description = "format() pattern (vcfa_url, org_name) for each org's OAuth app redirect URL. Guessed VCFA OIDC callback path, see README."
-  default     = "%s/tenant/%s/oauth/callback"
+  description = "format() pattern (vcfa_url, org_name) for each org's OAuth app redirect URL. Confirmed against a live tenant OIDC login, see the note above."
+  default     = "%s/login/oauth?service=tenant:%s"
 }
 
 variable "oauth_app_logout_url_pattern" {
