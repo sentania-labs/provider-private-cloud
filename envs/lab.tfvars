@@ -98,6 +98,22 @@ orgs = {
     name         = "vcf-lab-vm-apps"
     display_name = "VCF Lab VM Apps"
     is_enabled   = true
+    # This org is meant to be VCFA "VM Apps": classic, vRA-style soft
+    # tenancy. That is what the tenant repo vm-apps-private-cloud builds
+    # into it (cloud accounts, cloud zones, flavors, images, blueprints,
+    # catalog sharing), all of it the legacy vmware/vra surface.
+    #
+    # It was created NON-classic because the org module had no passthrough
+    # for this argument, so VCFA applied its own All Apps default.
+    #
+    # DO NOT APPLY THIS AS A ROUTINE CHANGE. is_classic_tenant is ForceNew:
+    # setting it on the existing org plans a destroy and recreate, which
+    # takes the region quota, the OIDC federation, the OAuth app cascade,
+    # org networking, local users, and everything the tenant repo built
+    # inside the org. See README's "Changing an org's classification"
+    # section for the ordering that has to be respected, and treat the
+    # first plan that shows a replace here as a decision, not a diff.
+    is_classic_tenant = true
     # Break-glass local admin, same rationale as all_apps above.
     #
     # Disabled 2026-08-03 pending a rights fix: vcfa_org_local_user creation

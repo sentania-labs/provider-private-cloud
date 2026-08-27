@@ -246,14 +246,28 @@ resource "terraform_data" "oauth_app_rotation_trigger" {
 }
 
 module "orgs" {
-  source   = "sentania-labs/org/vcfa"
-  version  = "~> 0.1.0"
+  source = "sentania-labs/org/vcfa"
+  # 0.2.0 is the first release carrying is_classic_tenant, so the bump off
+  # ~> 0.1.0 is load-bearing, not housekeeping.
+  #
+  # ~> 0.2.0, not ~> 0.2: Terraform reads ~> 0.2 as >= 0.2.0, < 1.0.0, so a
+  # later `terraform init -upgrade` could silently take 0.3.x or 0.9.x. This
+  # module is pre-1.0, where a minor bump is exactly where a breaking
+  # interface change is allowed to land, and 0.2.0 itself was a minor bump
+  # for a new argument. ~> 0.2.0 accepts 0.2.x patches only, matching the
+  # convention this repo already used at ~> 0.1.0.
+  version  = "~> 0.2.0"
   for_each = local.effective_orgs
 
   name         = each.value.name
   display_name = each.value.display_name
   description  = each.value.description
   is_enabled   = each.value.is_enabled
+
+  # VCFA "VM Apps" (classic/vRA soft tenancy) vs "All Apps"
+  # (Supervisor-backed). ForceNew: see the long note on var.orgs. null for
+  # any org that should stay All Apps, which produces no diff.
+  is_classic_tenant = each.value.is_classic_tenant
 
   # local_admin is deliberately not passed through to the module: the
   # module's local_admin.role_ids wants raw role reference ids, which only
