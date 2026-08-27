@@ -144,19 +144,22 @@ orgs = {
       ]
       rotation_id = "initial"
     }
-    networking = {
-      log_name = "vmapps"
-    }
-    region_quota = {
-      zone_name              = "domain-c10"
-      cpu_limit_mhz          = 999999999
-      cpu_reservation_mhz    = 0
-      memory_limit_mib       = 999999999
-      memory_reservation_mib = 0
-      vm_classes             = ["best-effort-small", "best-effort-medium"]
-      storage_classes = {
-        "iscsi-default-policy" = { limit_mib = 999999999 }
-      }
-    }
+    # A classic tenant has NEITHER of these, and VCFA enforces it. Proven on
+    # apply 33098805038, immediately after the org came back as classic:
+    #
+    #   VCD_50269 - Cannot create Virtual Datacenters in classic tenant
+    #               Organization "vcf-lab-vm-apps".
+    #   BAD_REQUEST - Unable to create Regional Networking Setting since the
+    #                 Organization is a classic tenant.
+    #
+    # Region quotas (vcf_virtual_datacenter rows) and regional networking are
+    # Supervisor-backed constructs and exist only for All Apps orgs. A VM Apps
+    # org gets its capacity the vRA way instead: cloud accounts, cloud zones,
+    # flavor and image mappings, all declared in vm-apps-private-cloud.
+    #
+    # This is the concrete answer to the question region_quota.tf used to
+    # hedge about. The restriction is real and absolute, not conditional.
+    networking   = null
+    region_quota = null
   }
 }
