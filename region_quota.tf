@@ -78,8 +78,39 @@ data "vcfa_region_storage_policy" "this" {
 # behave, but a classic tenant has no Supervisor namespaces, so anything in
 # this file that assumes Supervisor backing needs re-checking against a real
 # plan rather than assumed to carry over.
+# Forces the quota to be REPLACED, not updated in place, whenever its org is
+# replaced. Without this the teardown deadlocks, and it did on 2026-08-27:
+#
+#   vcfa_org_region_quota.this["vm_apps"] will be updated in-place
+#   ...
+#   Error: error deleting Organization: [409:INVALID_STATE] You must delete
+#   this organization's Region Quotas before you can delete the organization.
+#
+# The dependency edge (org_id below references module.orgs[key].id) is real,
+# but it only orders a destroy that Terraform actually plans. `org_id` is not
+# ForceNew on this resource, so a replaced org produced an in-place quota
+# update, meaning there was NO quota destroy to sequence before the org
+# delete. Terraform deleted the org while its quota still existed and VCFA
+# refused with a 409.
+#
+# terraform_data mirrors the org id, so it only shows a diff when the org is
+# actually replaced; replace_triggered_by then turns the quota's in-place
+# update into a destroy-and-create. Because the quota depends on the org, the
+# destroy is ordered BEFORE the org's own destroy, which is the ordering the
+# note at the top of this file describes. Same pattern as
+# terraform_data.oauth_app_rotation_trigger in orgs.tf.
+resource "terraform_data" "org_replace_trigger" {
+  for_each = local.region_quota_orgs
+
+  input = module.orgs[each.key].id
+}
+
 resource "vcfa_org_region_quota" "this" {
   for_each = local.region_quota_orgs
+
+  lifecycle {
+    replace_triggered_by = [terraform_data.org_replace_trigger[each.key]]
+  }
 
   org_id         = module.orgs[each.key].id
   region_id      = vcfa_region.region01.id

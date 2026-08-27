@@ -23,10 +23,19 @@ storage_policy_names = ["iscsi-default-policy"]
 # explicit go given during this PR's development.
 enable_orgs = true
 
-# Realm "VCF Lab", the only realm on the appliance (Ops 9.1.0.0 build
-# 25541561). An identifier, not a secret: committed here instead of
-# hand-supplied via TF_VAR so a working system needs no hand-population to run.
-sso_realm_id = "83369e94-bcad-4674-ba0d-e4b8b70730ee"
+# Realm "VCF Lab", the only realm on the appliance. An identifier, not a
+# secret: committed here instead of hand-supplied via TF_VAR so a working
+# system needs no hand-population to run.
+#
+# CORRECTED 2026-08-27. The previous value (83369e94-...) was stale and made
+# every oauth_app create fail with 400 InvalidParameter ssoRealmId, which is
+# why those resources have been absent from state and re-planning as creates.
+# Read live from
+#   GET /suite-api/api/fleet-management/iam/ssorealms
+# which returns exactly one realm, "VCF Lab". Re-read it from there rather
+# than trusting this line if oauth_app creates start failing again: Ops
+# rebuilds mint a new realm id.
+sso_realm_id = "11684a11-7492-4700-b9f9-f2aebd12df69"
 
 # Confirmed live against the appliance. A URL, not a secret.
 oidc_wellknown_endpoint = "https://vcf-lab-idb.int.sentania.net/acs/t/CUSTOMER/.well-known/openid-configuration"
