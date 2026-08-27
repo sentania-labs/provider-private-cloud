@@ -227,7 +227,7 @@ The suite-api username/password acquire endpoint (`/suite-api/api/auth/token/acq
 3. **Scheme**: the exchanged bearer token is presented to the `restapi` provider's `Authorization` header as `"Bearer <token>"`, not the old `"OpsToken <token>"` scheme (that scheme was specific to the retired suite-api acquire flow).
 4. **Lifetimes**: `VCF_LAB_API_TOKEN` itself is durable (180-day expiry, created 2026-08-03, due for regeneration around 2027-01-30); the bearer token it exchanges for is short-lived, roughly 30 minutes, which is why the exchange runs fresh on every CI invocation rather than being cached.
 
-The self-hosted runner needs `curl` and `jq` available; not verified from this workspace.
+Runs on the `lab` ARC pool (`runs-on: lab`, an exact string: array forms like `[self-hosted, terraform]` match nothing there and queue silently for ~24h). `curl`, `jq`, `git`, `gh` and terraform 1.14.0 are baked into the runner image, so no setup steps are needed, and the lab root CA is in its system trust store, which is what lets the Ops IAM and content-probe calls verify without `-k`. Contract: `sentania-labs/homelab-runner/docs/ci-consumer-contract.md`.
 
 ## SSO realm and OIDC discovery
 

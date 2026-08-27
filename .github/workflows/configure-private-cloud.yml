@@ -44,7 +44,7 @@ jobs:
   # main.
   lint:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
 
     env:
       TF_IN_AUTOMATION: "true"
@@ -89,7 +89,7 @@ jobs:
   plan-and-apply:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: lint
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
     timeout-minutes: 30
 
     env:
@@ -318,9 +318,15 @@ jobs:
         run: terraform apply -input=false -auto-approve tfplan
 
       # Unconditional: the local plan file (tfplan) carries the same
-      # sensitive root-variable values as the apply above and must not
-      # survive on this persistent self-hosted runner regardless of whether
-      # plan/apply succeeded, failed, or was skipped as plan-only.
+      # sensitive root-variable values as the apply above, regardless of
+      # whether plan/apply succeeded, failed, or was skipped as plan-only.
+      #
+      # The `lab` pool runs one ephemeral pod per job and destroys it
+      # afterwards, so this step cleans something that is about to cease to
+      # exist. Kept anyway, deliberately: it costs a second, it is correct
+      # on any runner, and it does not depend on the pool's disposal
+      # behaviour staying true. What is NOT true any more is the reason
+      # originally written here, that the runner is persistent.
       - name: Clean workspace
         if: always()
         run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete
@@ -336,7 +342,7 @@ jobs:
   content:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: plan-and-apply
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
     timeout-minutes: 30
 
     defaults:
@@ -396,16 +402,27 @@ jobs:
 
           vcfa_url=$(grep '^vcfa_url' envs/lab.tfvars | cut -d '"' -f2)
 
-          # -k: this runner does not trust the lab CA that signs
-          # vcf-lab-automation.int.sentania.net. The vcfa terraform provider
-          # already runs against this same host with
-          # allow_unverified_ssl = var.insecure (true in envs/lab.tfvars,
-          # this is a lab), so this mirrors that already-accepted trust
-          # decision rather than being a general "skip TLS" choice.
+          # TLS is verified normally here. These two calls carried -k from
+          # 189760e, added because the OLD self-hosted runner did not trust
+          # the lab CA and the probe failed with curl exit 60. The `lab`
+          # image ships the lab root CA in its system trust store, so the
+          # cause is gone and the workaround goes with it.
+          #
+          # Verified rather than assumed: vcf-lab-automation.int.sentania.net
+          # presents a cert issued by "sentania Lab Issuing 2", and curl
+          # against it from a host carrying that CA returns
+          # ssl_verify_result=0 with no -k.
+          #
+          # This does NOT follow the vcfa provider's allow_unverified_ssl:
+          # that is a separate, already-accepted decision for the provider,
+          # and there is no reason to copy it here now that these calls can
+          # verify properly. If this step ever fails with curl exit 60
+          # again, the CA is missing from the image: fix it there rather
+          # than restoring -k here.
           token_body_file=$(mktemp)
           trap 'rm -f "$token_body_file"' EXIT
 
-          token_status=$(curl -sk -o "$token_body_file" -w '%{http_code}' -X POST "$vcfa_url/oauth/provider/token" \
+          token_status=$(curl -s -o "$token_body_file" -w '%{http_code}' -X POST "$vcfa_url/oauth/provider/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=refresh_token" \
             --data-urlencode "refresh_token=$TF_VAR_vcfa_api_token") || token_status="000"
@@ -430,7 +447,7 @@ jobs:
           response_body_file=$(mktemp)
           trap 'rm -f "$token_body_file" "$response_body_file"' EXIT
 
-          response_status=$(curl -sk -o "$response_body_file" -w '%{http_code}' -G "$vcfa_url/cloudapi/vcf/contentLibraries/" \
+          response_status=$(curl -s -o "$response_body_file" -w '%{http_code}' -G "$vcfa_url/cloudapi/vcf/contentLibraries/" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json;version=40.0" \
             --data-urlencode "filter=name==vcf-lab-content-library") || response_status="000"
@@ -475,8 +492,9 @@ jobs:
         run: terraform apply -input=false -auto-approve tfplan
 
       # Unconditional, same rationale as the platform stage's cleanup step:
-      # tfplan is credential-adjacent (references live storage class/org
-      # ids) and must not survive on this persistent self-hosted runner.
+      # tfplan is credential-adjacent (it references live storage class and
+      # org ids). See that step for why this is kept even though `lab` pods
+      # are ephemeral.
       - name: Clean workspace
         if: always()
         working-directory: .
