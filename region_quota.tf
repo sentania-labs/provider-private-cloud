@@ -102,7 +102,16 @@ data "vcfa_region_storage_policy" "this" {
 resource "terraform_data" "org_replace_trigger" {
   for_each = local.region_quota_orgs
 
-  input = module.orgs[each.key].id
+  # triggers_replace, NOT input. This is the whole point of the resource and
+  # it was wrong on the first attempt: with `input`, a changed org id updates
+  # terraform_data IN PLACE, and replace_triggered_by referencing the whole
+  # resource only fires when that resource is REPLACED. The plan on run
+  # 33098229616 proved it, still showing
+  #   vcfa_org_region_quota.this["vm_apps"] will be updated in-place
+  # against an org that "must be replaced". triggers_replace makes the
+  # terraform_data itself get replaced when the org id changes, which is what
+  # replace_triggered_by is watching for.
+  triggers_replace = module.orgs[each.key].id
 }
 
 resource "vcfa_org_region_quota" "this" {
