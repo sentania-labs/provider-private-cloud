@@ -63,11 +63,21 @@ data "vcfa_region_storage_policy" "this" {
   name      = each.value.storage_class
 }
 
-# Checked against the VCF 9.1 restriction on region quotas for VM-Apps-
-# classified orgs: neither the org/vcfa module (~> 0.1.0) nor the vcfa
-# provider's vcfa_org resource (v1.2) exposes an org_type/classification
-# argument, so there is no path in this repo that could create a
-# VM-Apps-restricted org; not applicable here.
+# CORRECTED 2026-08-27. This comment previously read that neither the
+# org/vcfa module nor vcfa_org exposes an org classification argument, and
+# concluded the VCF 9.1 restriction on region quotas for VM-Apps orgs was
+# therefore not applicable here. The first half was wrong:
+# vcfa_org.is_classic_tenant has existed since provider v1.0.0 (verified in
+# resource_vcfa_org.go at v1.0.0/v1.1.0/v1.2.0). Only the module lacked a
+# passthrough, which it no longer does. vcf-lab-vm-apps was created
+# non-classic as a result of that gap, not by choice.
+#
+# So the restriction IS live once an org here sets is_classic_tenant = true.
+# Confirm what a classic tenant may hold in a region quota before the first
+# apply that creates one: VM classes and storage policies are expected to
+# behave, but a classic tenant has no Supervisor namespaces, so anything in
+# this file that assumes Supervisor backing needs re-checking against a real
+# plan rather than assumed to carry over.
 resource "vcfa_org_region_quota" "this" {
   for_each = local.region_quota_orgs
 

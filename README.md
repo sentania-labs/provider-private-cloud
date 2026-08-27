@@ -255,6 +255,43 @@ All identity strings are lowercase (LDAP-aligned; the sibling repo `vm-apps-priv
 
 **Manual step this still requires**: the org module records this group-to-role mapping in Terraform config, but there is no `vcfa` provider resource for the actual group-to-role binding (no group-import CRUD surface in provider v1.2). Creating the binding itself remains a one-time manual portal step per org after apply. `module.orgs[*].oidc_group_role_map` output exists for reference but isn't wired to any resource.
 
+
+## Changing an org's classification
+
+`is_classic_tenant` decides whether an org is VCFA **VM Apps** (classic,
+vRA-style soft tenancy: catalog, blueprints, deployments) or **All Apps**
+(Supervisor-backed: namespaces, Kubernetes clusters, VM Service VMs). It is
+set per org in `envs/lab.tfvars`.
+
+**It cannot be changed on a live org.** `vcfa_org.is_classic_tenant` is
+`ForceNew` in the provider, commented "Cannot be changed once created", and
+the provider's update path ignores the field entirely. Terraform's only way
+to satisfy a change is to destroy the org and create a new one.
+
+That is not a settings change, it is a tenant teardown. An org replace takes
+with it:
+
+- the org's **region quota**, i.e. the `vcf_virtual_datacenter` row. Note the
+  ordering trap already documented in `region_quota.tf`: an org cannot be
+  deleted while it owns a quota. The API returns 202 and the task then fails
+  with a raw Postgres FK error. Quota first on the way out.
+- the org's **OIDC federation**, and with it the OAuth app cascade in
+  `orgs.tf` (a new org means a new redirect URI, so the registered app's
+  URLs no longer match).
+- **org networking** and its `log_name`.
+- any **local users**.
+- **everything the tenant repo built inside the org.** For `vcf-lab-vm-apps`
+  that is all of `vm-apps-private-cloud`: cloud accounts, cloud zones,
+  flavor and image mappings, blueprints, projects, catalog sharing.
+
+So the sequence for a classification change is: confirm the teardown is
+wanted, destroy the tenant repo's objects, remove the region quota, replace
+the org, then rebuild tenant content. Not a single `terraform apply`.
+
+**If a plan against this repo ever shows `vcfa_org` being replaced, stop.**
+That is either this change being applied deliberately, or a bug. There is no
+third reason for an org to be replaced.
+
 ## Region quota
 
 Both orgs are entitled to the **whole region, no ceiling** (Scott's ruling): whichever org fills the region's capacity first takes it, the other fails to provision. This is a deliberate choice, not an oversight, and it's easy to tighten later since region quota is a root-level resource (`region_quota.tf`), not deeply coupled to anything else in the graph.

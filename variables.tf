@@ -191,6 +191,24 @@ variable "orgs" {
     display_name = string
     description  = optional(string, "")
     is_enabled   = optional(bool, true)
+    # VCFA's "VM Apps" vs "All Apps" classification. true = classic,
+    # vRA-style soft tenancy (catalog, blueprints, deployments, the legacy
+    # vmware/vra surface). Omitted/null = Supervisor-backed "All Apps",
+    # which is what VCFA defaults to and what every org here was created as.
+    #
+    # IMMUTABLE. vcfa_org.is_classic_tenant is ForceNew in the provider
+    # ("Cannot be changed once created") and its update path ignores the
+    # field, so changing this on an org that already exists does not amend
+    # it: Terraform plans a DESTROY AND RECREATE. Because the org owns the
+    # region quota (the vcf_virtual_datacenter row, see region_quota.tf's
+    # teardown note), its OIDC federation, its local users and every tenant
+    # object inside it, that replace is a full teardown of the tenant, not a
+    # settings change. Never let this reach an apply without deciding that
+    # deliberately.
+    #
+    # Left null rather than false for orgs that should stay All Apps: null
+    # omits the argument, which cannot produce a diff on a ForceNew field.
+    is_classic_tenant = optional(bool)
     # Break-glass local (non-federated) admin user for the org. role_name is
     # a role NAME (e.g. "Organization Administrator"), not a raw role_ids
     # reference: the role's id only exists once the org itself exists, so it
