@@ -44,7 +44,7 @@ jobs:
   # main.
   lint:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.owner.login == 'sentania-labs'
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
 
     env:
       TF_IN_AUTOMATION: "true"
@@ -89,7 +89,7 @@ jobs:
   plan-and-apply:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: lint
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
     timeout-minutes: 30
 
     env:
@@ -318,9 +318,15 @@ jobs:
         run: terraform apply -input=false -auto-approve tfplan
 
       # Unconditional: the local plan file (tfplan) carries the same
-      # sensitive root-variable values as the apply above and must not
-      # survive on this persistent self-hosted runner regardless of whether
-      # plan/apply succeeded, failed, or was skipped as plan-only.
+      # sensitive root-variable values as the apply above, regardless of
+      # whether plan/apply succeeded, failed, or was skipped as plan-only.
+      #
+      # The `lab` pool runs one ephemeral pod per job and destroys it
+      # afterwards, so this step cleans something that is about to cease to
+      # exist. Kept anyway, deliberately: it costs a second, it is correct
+      # on any runner, and it does not depend on the pool's disposal
+      # behaviour staying true. What is NOT true any more is the reason
+      # originally written here, that the runner is persistent.
       - name: Clean workspace
         if: always()
         run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete
@@ -336,7 +342,7 @@ jobs:
   content:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: plan-and-apply
-    runs-on: [self-hosted, terraform]
+    runs-on: lab
     timeout-minutes: 30
 
     defaults:
@@ -475,8 +481,9 @@ jobs:
         run: terraform apply -input=false -auto-approve tfplan
 
       # Unconditional, same rationale as the platform stage's cleanup step:
-      # tfplan is credential-adjacent (references live storage class/org
-      # ids) and must not survive on this persistent self-hosted runner.
+      # tfplan is credential-adjacent (it references live storage class and
+      # org ids). See that step for why this is kept even though `lab` pods
+      # are ephemeral.
       - name: Clean workspace
         if: always()
         working-directory: .
