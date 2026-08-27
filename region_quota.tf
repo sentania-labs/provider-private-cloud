@@ -72,12 +72,22 @@ data "vcfa_region_storage_policy" "this" {
 # passthrough, which it no longer does. vcf-lab-vm-apps was created
 # non-classic as a result of that gap, not by choice.
 #
-# So the restriction IS live once an org here sets is_classic_tenant = true.
-# Confirm what a classic tenant may hold in a region quota before the first
-# apply that creates one: VM classes and storage policies are expected to
-# behave, but a classic tenant has no Supervisor namespaces, so anything in
-# this file that assumes Supervisor backing needs re-checking against a real
-# plan rather than assumed to carry over.
+# ANSWERED 2026-08-27 by apply 33098805038, which is no longer a hedge: a
+# classic tenant may hold NO region quota at all.
+#
+#   VCD_50269 - Cannot create Virtual Datacenters in classic tenant
+#               Organization "vcf-lab-vm-apps".
+#
+# Not "a restricted quota", none. The same applies to regional networking
+# (BAD_REQUEST on the same apply). Both are Supervisor-backed constructs and
+# belong only to All Apps orgs; a VM Apps org gets capacity through the vRA
+# surface instead (cloud accounts, cloud zones, flavor and image mappings,
+# declared in vm-apps-private-cloud).
+#
+# Consequence for this file: an org with is_classic_tenant = true must have
+# region_quota = null in tfvars, which is how vm_apps is now configured.
+# local.region_quota_orgs filters on region_quota != null, so a classic org
+# simply drops out and nothing here runs for it.
 # Forces the quota to be REPLACED, not updated in place, whenever its org is
 # replaced. Without this the teardown deadlocks, and it did on 2026-08-27:
 #
