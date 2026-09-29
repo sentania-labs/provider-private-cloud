@@ -51,7 +51,7 @@ data: vcfa_vcenter, vcfa_nsx_manager, vcfa_supervisor
 
 ## State & CI
 
-- **Backend:** S3 bucket `sentania-labs-terraform-state`, key `vcfa/provider-private-cloud/lab/terraform.tfstate`, `use_lockfile = true`. **This state is credential-bearing** (every org's OIDC client secret lives in it, see README): treat access to it like access to a credential vault, not general infra read access.
+- **Backend:** lab S3 (`https://s3.int.sentania.net:9443`, bucket `tfstate`; moved from AWS 2026-09-28), key `vcfa/provider-private-cloud/lab/terraform.tfstate`, `use_lockfile = true`. **This state is credential-bearing** (every org's OIDC client secret lives in it, see README): treat access to it like access to a credential vault, not general infra read access.
 - **CI:** `.github/workflows/configure-private-cloud.yml`, self-hosted `[self-hosted, terraform]` runner, two jobs. `lint` runs on every push and PR (fork-gated: `github.event.pull_request.head.repo.owner.login == 'sentania-labs'`), gets no secrets, and only does fmt-check plus a backend-less `terraform validate`. `plan-and-apply` runs only on push to `main`, is the sole place production secrets are injected, and never uploads the plan as an artifact or leaves `tfplan` on the runner: it's created and consumed in one step, and cleanup runs with `if: always()`. This split exists because this repo's plans and state are credential-bearing (see "State is credential-bearing" above); don't move credentialed steps back onto `pull_request` events even for convenience.
 
 ## Versions

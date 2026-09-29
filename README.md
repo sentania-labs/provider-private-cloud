@@ -124,9 +124,9 @@ Supplied via `TF_VAR_*` (see the CI workflow for the exact secret names):
 
 ## State is credential-bearing
 
-**`vcfa_org_oidc` has only a plain `client_secret` argument (no write-only variant in provider v1.2), so every org's OIDC client secret is recorded in Terraform state.** Treat the S3 state object (`sentania-labs-terraform-state`, key `vcfa/provider-private-cloud/lab/terraform.tfstate`) as a credential store, not just infrastructure metadata: state access should be scoped as tightly as an IAM credential vault, not general read access to the state bucket.
+**`vcfa_org_oidc` has only a plain `client_secret` argument (no write-only variant in provider v1.2), so every org's OIDC client secret is recorded in Terraform state.** Treat the S3 state object (lab S3 `https://s3.int.sentania.net:9443`, bucket `tfstate`, key `vcfa/provider-private-cloud/lab/terraform.tfstate`; moved from the AWS bucket `sentania-labs-terraform-state` on 2026-09-28) as a credential store, not just infrastructure metadata: state access should be scoped as tightly as an IAM credential vault, not general read access to the state bucket.
 
-S3 bucket encryption-at-rest finding: **could not check.** This environment has no AWS credentials available to run `aws s3api get-bucket-encryption --bucket sentania-labs-terraform-state`. Scott should confirm this directly; the bucket's encryption setting is not something this repo changes (evidence gathering only, never remediation, and out of reach from this session regardless).
+Encryption at rest: **none.** The lab S3 (versitygw on the Synology) has no server-side encryption and the volume is not encrypted; Scott accepted that for the lab on 2026-09-28. Protection is access control (a dedicated `tfstate` key, org secret scoped to the Terraform repos) and HTTPS in transit. Rollback of a bad state write is the Synology's hourly share snapshots.
 
 ## How OIDC client secrets are minted (not carried by hand)
 
@@ -309,7 +309,7 @@ No true "unlimited" sentinel is documented for `vcfa_org_region_quota`'s `cpu_li
 
 Check these against the repo's actual Settings > Secrets > Actions page:
 
-- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`: S3 backend (both stages: platform's `terraform.tfstate` and content's `content.tfstate`)
+- `TF_STATE_S3_ACCESS_KEY_ID`, `TF_STATE_S3_SECRET_ACCESS_KEY`: state backend on the lab S3 (both stages: platform's `terraform.tfstate` and content's `content.tfstate`), passed to the S3 backend under the AWS_* names; org secrets scoped to the Terraform repos
 - `VCF_LAB_PROVIDER_REFRESH_KEY`: vcfa provider api_token (VCF Admin service account). Used by both the platform stage and the `content` job: content library operations are org System, PROVIDER-scoped, same auth as the platform root.
 - `VCF_LAB_API_TOKEN`: durable vIDB user API token for the `vcf@int.sentania.net` service account (VCF Admin role, 180-day expiry, created 2026-08-03, due for regeneration around 2027-01-30). Exchanged at CI runtime for a short-lived (~30 minute) Ops API bearer token, see "Ops API auth" above
 - `VCFA_FIRST_USER_DEFAULT_PASSWORD`: single shared password for both orgs' break-glass local admin users. The "Build local admin passwords" step turns it into the `map(string)` JSON `TF_VAR_local_admin_passwords` wants (keyed `all_apps`/`vm_apps`) via `jq -nc --arg`, reading the value from an env var rather than interpolating it into a shell command string, so it never lands in a logged command line.
